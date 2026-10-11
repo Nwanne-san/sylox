@@ -286,7 +286,7 @@ $deploy_out"
   log "minted $DEMO_KEEPER_BOND DMUSD to the demo keeper"
 
   log "[5/8] Precomputing contract addresses (constructor flow, deploy.sh testnet's own technique)"
-  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v1"
+  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v2"
   salt_for_demo() {
     local contract="$1"
     echo -n "${CONSTRUCTOR_NONCE_DEMO}-${contract}" | shasum -a 256 | cut -d' ' -f1
@@ -385,32 +385,64 @@ $deploy_out"
   invoke_demo "$MF_ID" "$DEMO_ADMIN" set_related_sellers --asset "$DMFRZ_ID" --list "[\"$DEMO_ASSET_ISSUER_ADDR\"]" >/dev/null
   log "MarketFactory.set_related_sellers: DMFRZ's own issuer listed"
 
-  # One signal, as old as the backfill window (WINDOW_SECS) allows
-  # right now, purely so is_stale passes below - never a claim that
-  # real history exists yet. scenario.sh picks up from this exact
-  # epoch to build the full 168 epoch span buy_cover's own cover_cap
-  # needs (see this section's own header comment).
-  NOW_TS="$(date -u +%s)"
-  OLDEST_EPOCH=$(( NOW_TS / EPOCH_SECS - WINDOW_SECS / EPOCH_SECS ))
+  # The full immediate backfill, oldest epoch first: RiskOracle.
+  # first_epoch is write-once, set by whichever post reaches the
+  # contract FIRST for this asset (deploy/README.md's own
+  # extensively-documented gotcha, from the real deployment's own
+  # history) - posting the OLDEST backfillable epoch first anchors it
+  # there, not wherever a later, fresher post would otherwise land it.
+  # Posting on through to the most recently closed epoch also leaves
+  # the newest posted epoch fresh, so is_stale passes for open_series
+  # right below. scenario.sh picks up from this exact seed_epoch to
+  # build the full 168-epoch span buy_cover's own cover_cap needs
+  # (see this section's own header comment); this loop only ever
+  # covers the 72 epochs the backfill window itself allows for free,
+  # real transaction time, not real epoch-boundary waiting.
+  SEED_EPOCH=$(( $(date -u +%s) / EPOCH_SECS - WINDOW_SECS / EPOCH_SECS ))
   SUPPLY="10000000000000"
   LIQUIDITY="500000000000"
-  SIGNAL_SET="{\"epoch\":$OLDEST_EPOCH,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"$LIQUIDITY\",\"redemption_net\":\"0\",\"supply\":\"$SUPPLY\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$(printf 'deploy-demo-seed' | sha256sum | cut -d' ' -f1)\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
-  if post_out="$(invoke_demo "$RO_ID" "$DEMO_KEEPER" post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$SIGNAL_SET" 2>&1)"; then
-    log "RiskOracle.post_signals: seed epoch $OLDEST_EPOCH posted"
-  elif echo "$post_out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
-    log "seed epoch $OLDEST_EPOCH already posted (re-run)"
-  else
-    die "post_signals (seed epoch) failed:
+  post_seed_signal() {
+    local epoch="$1"
+    local inputs_hash
+    inputs_hash="$(printf 'deploy-demo-seed-%s' "$epoch" | sha256sum | cut -d' ' -f1)"
+    local signal_set="{\"epoch\":$epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"$LIQUIDITY\",\"redemption_net\":\"0\",\"supply\":\"$SUPPLY\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
+    local post_out
+    if post_out="$(invoke_demo "$RO_ID" "$DEMO_KEEPER" post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)"; then
+      return 0
+    elif echo "$post_out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
+      return 0
+    else
+      die "post_signals (epoch $epoch) failed:
 $post_out"
-  fi
+    fi
+  }
+  # A converging catch-up loop, not a fixed range: posting itself
+  # takes real seconds per transaction, during which more epochs keep
+  # closing. Recomputes "now" every pass (post-demo-signals.sh's own
+  # established convention for the same reason) and keeps posting
+  # whatever has newly closed until it is caught up to within
+  # STALE_AFTER_EPOCHS (3) of real time - converges because posting
+  # one epoch (a few real seconds) is faster than one epoch closing
+  # (EPOCH_SECS, 12 real seconds).
+  next_to_post=$SEED_EPOCH
+  while true; do
+    newest_closed=$(( $(date -u +%s) / EPOCH_SECS - 1 ))
+    # Caught up to the current newest closed epoch: as fresh as
+    # posting can make it, so is_stale will pass. Nothing left to
+    # post right now, so stop rather than spin.
+    (( next_to_post > newest_closed )) && break
+    post_seed_signal "$next_to_post"
+    next_to_post=$(( next_to_post + 1 ))
+  done
+  log "RiskOracle.post_signals: immediate backfill posted and caught up to real time, epochs $SEED_EPOCH..$((next_to_post - 1))"
 
-  DEMO_START="$NOW_TS"
-  DEMO_EXPIRY=$(( NOW_TS + 3600 ))
+  DEMO_START="$(date -u +%s)"
+  DEMO_EXPIRY=$(( DEMO_START + 3600 ))
   DEMO_CLAIM_WINDOW=600
   DEMO_TERMS="{\"asset\":\"$DMFRZ_ID\",\"def_versions\":{\"IssuerFreeze\":1},\"settlement\":\"$DMUSD_ID\",\"start\":$DEMO_START,\"expiry\":$DEMO_EXPIRY,\"claim_window_secs\":$DEMO_CLAIM_WINDOW,\"cap\":\"1000000000000000\",\"max_cover_per_buyer\":\"1000000000000000\",\"require_holding\":false,\"fee_bps\":750}"
   SERIES_ID="$("$STELLAR_BIN" contract invoke --id "$MF_ID" --source-account "$DEMO_ADMIN" --network testnet -- open_series --terms "$DEMO_TERMS" | tail -1)"
   [[ "$SERIES_ID" =~ ^C[A-Z0-9]{55}$ ]] || die "open_series did not return a contract address: $SERIES_ID"
-  log "MarketFactory.open_series: Series deployed at $SERIES_ID (expiry in ${DEMO_EXPIRY}-${NOW_TS}=$(( DEMO_EXPIRY - NOW_TS))s, claim_window_secs=$DEMO_CLAIM_WINDOW)"
+  log "MarketFactory.open_series: Series deployed at $SERIES_ID (expiry in $(( DEMO_EXPIRY - DEMO_START))s, claim_window_secs=$DEMO_CLAIM_WINDOW)"
 
   log "[8/8] Writing the deployment record"
   mkdir -p "$DEPLOYMENTS_DIR"
@@ -453,7 +485,7 @@ $post_out"
     "expiry": $DEMO_EXPIRY,
     "claim_window_secs": $DEMO_CLAIM_WINDOW
   },
-  "seed_epoch": $OLDEST_EPOCH,
+  "seed_epoch": $SEED_EPOCH,
   "identities": {
     "deployer": "$DEMO_DEPLOYER_ADDR",
     "admin": "$DEMO_ADMIN_ADDR",
