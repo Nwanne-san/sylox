@@ -59,8 +59,7 @@ pub const AGGREGATE_SLOTS_7D: u32 = 168;
 /// EPOCH_SECS`) a Depeg `EventDefinition` may register, 72 hours'
 /// worth. Keeps `CureProgress`'s own `recorded: u128` bitmap
 /// comfortably sized for every definition this build can register,
-/// with headroom to spare. technical-doc.md Section 8.8, PR #15
-/// review finding F3.
+/// with headroom to spare. technical-doc.md Section 8.8.
 pub const MAX_CURE_EPOCHS: u64 = 72;
 
 /// `EventDefinition.max_missing_epochs`'s own documented default for
@@ -70,14 +69,13 @@ pub const MAX_CURE_EPOCHS: u64 = 72;
 pub const DEPEG_MISSING_EPOCH_TOLERANCE_DEFAULT: u32 = 6;
 
 /// `challenge_secs` must be a whole number of epochs, at least one
-/// epoch long. technical-doc.md Section 8.8, PR #15 review finding
-/// F3.
+/// epoch long. technical-doc.md Section 8.8.
 pub const CHALLENGE_SECS_MIN_EPOCHS: u64 = 1;
 
 /// `challenge_secs` must be at most `MAX_CURE_EPOCHS` epochs long, so
 /// `CureProgress`'s `u128` bitmap always has room for every cure-window
 /// epoch a registered definition could need. technical-doc.md Section
-/// 8.8, PR #15 review finding F3.
+/// 8.8.
 pub const CHALLENGE_SECS_MAX_EPOCHS: u64 = MAX_CURE_EPOCHS;
 
 /// Fixed number of slots in the per asset sub-epoch ring, `Sub(asset)`.
@@ -165,7 +163,7 @@ pub const MAX_DEPEG_WINDOW_EPOCHS: u64 = (RING_SLOTS - AGGREGATE_SLOTS_7D) as u6
 /// Set at `MAX_DEPEG_WINDOW_EPOCHS + 1 = 73`: the structural maximum
 /// a Depeg definition's own window can ever produce (one more than
 /// `MAX_DEPEG_WINDOW_EPOCHS`, for `depeg_check`'s own inclusive loop
-/// bound). Review finding: this means `UnbuiltBacklog` can NEVER
+/// bound). This means `UnbuiltBacklog` can NEVER
 /// actually be reached while `register_definition` enforces
 /// `MAX_DEPEG_WINDOW_EPOCHS` (no registered definition, nor the
 /// default window, can ever produce more than this many unbuilt
