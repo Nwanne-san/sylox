@@ -22,15 +22,30 @@
 //! entirely out of how many SECONDS one epoch actually is. `EPOCH_SECS`
 //! and `SUB_EPOCH_GRID_SECS` are the only two constants in this whole
 //! module with a real "seconds" unit, and they are the only two this
-//! feature touches, both divided by the same factor (300, the largest
-//! that keeps `SUB_EPOCH_GRID_SECS` a whole number of seconds) so their
+//! feature touches, both divided by the same factor (60) so their
 //! ratio - and every window expressed as a multiple of either one -
 //! comes out identical in both builds. A contract built with this
 //! feature plays through the exact same sequence of epochs and windows
 //! as the normal build, just over minutes instead of weeks, for a live
 //! demo deployment. It must never reach a real deployment: see
 //! `RiskOracle::demo_build()`.
-
+//!
+//! **Why 60, not the largest factor (300) that would still keep
+//! `SUB_EPOCH_GRID_SECS` a whole second.** Found by a real testnet
+//! run, not reasoned out in advance: `env.ledger().timestamp()`
+//! reflects the last CLOSED ledger's own close time, which lags real
+//! wall-clock time by up to one ledger-close interval (about 5-6s on
+//! testnet) at any given moment. At `EPOCH_SECS = 12` (factor 300),
+//! that lag is close enough to a full epoch that `post_signals`'
+//! own `check_epoch_window` genuinely rejected a real post as not
+//! yet closed, deploy/deploy.sh testnet-demo's own backfill loop
+//! computing against real wall-clock time slightly ahead of what the
+//! ledger itself would confirm. Factor 60 (`EPOCH_SECS = 60`) keeps a
+//! roughly 10x margin between one epoch and that lag, comfortable
+//! rather than knife-edge, at the cost of the real wait
+//! deploy/demo/scenario.sh's own history-building step needs scaling
+//! up by the same 5x (still far short of the real deployment's own
+//! multi-day wait).
 use crate::network_limits::CONTRACT_DATA_ENTRY_SIZE_BYTES;
 
 /// One epoch, in seconds. technical-doc.md's own default throughout:
@@ -40,7 +55,7 @@ use crate::network_limits::CONTRACT_DATA_ENTRY_SIZE_BYTES;
 #[cfg(not(feature = "demo-time"))]
 pub const EPOCH_SECS: u64 = 3_600;
 #[cfg(feature = "demo-time")]
-pub const EPOCH_SECS: u64 = 12;
+pub const EPOCH_SECS: u64 = 60;
 
 /// Number of slots in the per asset hourly ring buffer: the longest
 /// v1 depeg window (72h) plus the 7 day liquidity baseline before it,
@@ -97,7 +112,7 @@ pub const SUB_RING_SLOTS: u32 = 60;
 #[cfg(not(feature = "demo-time"))]
 pub const SUB_EPOCH_GRID_SECS: u64 = 300;
 #[cfg(feature = "demo-time")]
-pub const SUB_EPOCH_GRID_SECS: u64 = 1;
+pub const SUB_EPOCH_GRID_SECS: u64 = 5;
 
 /// Build-time check: `EPOCH_SECS` is exactly 12 `SUB_EPOCH_GRID_SECS`
 /// units, in both builds. This is the "in proportion" guarantee the

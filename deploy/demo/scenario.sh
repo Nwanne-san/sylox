@@ -48,13 +48,13 @@
 # RiskOracle.median_liquidity - a REAL 168-epoch span of posted
 # history, the exact same structural requirement the real deployment
 # has, just compressed by the demo-time feature's own epoch length
-# (12 real seconds instead of 3,600). The 72-epoch backfill window
+# (60 real seconds instead of 3,600). The 72-epoch backfill window
 # lets most of that span be posted immediately; the rest has to
-# genuinely elapse in real time, about 19 minutes at this build's own
+# genuinely elapse in real time, about 96 minutes at this build's own
 # demo-time scale (contracts/types/src/time.rs). This is the SAME
 # physical constraint deploy/post-demo-signals.sh already documents
 # for the real deployment ("takes real wall-clock minutes"), just
-# compressed from about a week down to about 19 minutes, not
+# compressed from about a week down to about 96 minutes, not
 # eliminated - eliminating it would mean shrinking AGGREGATE_SLOTS_7D
 # itself, which the brief was explicit about never doing ("keeping
 # every window the same number of epochs").
@@ -94,8 +94,8 @@ DEMO_KEEPER=sylox-demo-time-keeper
 # Mirrors contracts/types/src/time.rs's own demo-time-scaled values;
 # see deploy/deploy.sh testnet-demo's own identical comment for why
 # this cannot just be imported.
-EPOCH_SECS=12
-WINDOW_SECS=864
+EPOCH_SECS=60
+WINDOW_SECS=4320
 
 TX_LINKS=()
 record_tx() {

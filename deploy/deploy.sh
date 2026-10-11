@@ -130,12 +130,14 @@ die() { echo "FATAL: $*" >&2; exit 1; }
 # IssuerFreeze definition, ready for scenario.sh to run the actual
 # story against. Writes deployments/testnet-demo.json.
 #
-# Posts exactly one signal (the oldest the backfill window allows),
-# purely so is_stale passes for open_series below; everything else
-# that touches RiskOracle - the full history buy_cover's own
-# cover_cap needs, the real revocation and clawback, proposing and
-# finalizing the event - is scenario.sh's own job, the same split
-# deploy.sh/post-demo-signals.sh already use for the real deployment.
+# Backfills RiskOracle from the oldest allowed epoch up to the real
+# newest closed epoch (a converging loop, since posting itself takes
+# real seconds during which more epochs close), purely so is_stale
+# passes for open_series below; the full 168-epoch span buy_cover's
+# own cover_cap needs, the real revocation and clawback, and
+# proposing/finalizing the event are scenario.sh's own job, the same
+# split deploy.sh/post-demo-signals.sh already use for the real
+# deployment.
 #
 # Never touches deployments/testnet.json, any sylox-testnet-*
 # identity, or TUSD/the real tracked USDC asset. Safe to re-run: a
@@ -154,14 +156,14 @@ if [[ "$NETWORK" == "testnet-demo" ]]; then
   HORIZON_URL="https://horizon-testnet.stellar.org"
 
   # Mirrors sylox_types::time's own demo-time-scaled values exactly
-  # (EPOCH_SECS = 3,600 / 300 = 12; WINDOW_SECS = 72 * EPOCH_SECS).
+  # (EPOCH_SECS = 3,600 / 60 = 60; WINDOW_SECS = 72 * EPOCH_SECS).
   # This shell script cannot import the Rust constants directly, the
   # same reasoning deploy/demo-asset-trigger.sh's own hardcoded
   # EPOCH_SECS already documents for the normal scale. If
-  # contracts/types/src/time.rs's own scale factor (300) ever
+  # contracts/types/src/time.rs's own scale factor (60) ever
   # changes, this must change to match.
-  EPOCH_SECS=12
-  WINDOW_SECS=864
+  EPOCH_SECS=60
+  WINDOW_SECS=4320
 
   log "[1/8] Preflight"
   got_version="$("$STELLAR_BIN" --version | head -1 | awk '{print $2}')"
@@ -286,7 +288,7 @@ $deploy_out"
   log "minted $DEMO_KEEPER_BOND DMUSD to the demo keeper"
 
   log "[5/8] Precomputing contract addresses (constructor flow, deploy.sh testnet's own technique)"
-  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v2"
+  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v3"
   salt_for_demo() {
     local contract="$1"
     echo -n "${CONSTRUCTOR_NONCE_DEMO}-${contract}" | shasum -a 256 | cut -d' ' -f1
@@ -374,7 +376,7 @@ $deploy_out"
   # real revocation triggers (technical-doc.md Section 8.2: triggers
   # on EITHER clawback_sum/supply > freeze_pct_bps OR auth_revocations
   # > auth_revocation_threshold). challenge_secs is the demo-time
-  # scaled minimum (1 epoch, CHALLENGE_SECS_MIN_EPOCHS) - 12 real
+  # scaled minimum (1 epoch, CHALLENGE_SECS_MIN_EPOCHS) - 60 real
   # seconds here, versus the 3,600 (1 hour) deploy/demo-asset.sh uses
   # for DEMOUSD at the normal scale, the same "shortest legal window"
   # choice just scaled down.
@@ -423,7 +425,7 @@ $post_out"
   # whatever has newly closed until it is caught up to within
   # STALE_AFTER_EPOCHS (3) of real time - converges because posting
   # one epoch (a few real seconds) is faster than one epoch closing
-  # (EPOCH_SECS, 12 real seconds).
+  # (EPOCH_SECS, 60 real seconds).
   next_to_post=$SEED_EPOCH
   while true; do
     newest_closed=$(( $(date -u +%s) / EPOCH_SECS - 1 ))
