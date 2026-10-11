@@ -10,9 +10,37 @@
 //! and `AGGREGATE_SLOTS_7D`, `MAX_CURE_EPOCHS`, the Depeg missing-epoch
 //! tolerance default, and the `challenge_secs` bound each lived as a
 //! private constant or bare literal in one contract's own crate. Both
-//! crates now import these from here instead.
+//! crates now import these from here instead. `EPOCH_SECS` itself was
+//! the same story (duplicated privately in `risk-oracle`,
+//! `event-registry` and `staking`): centralized here too, for the same
+//! reason and so the `demo-time` feature below has exactly one
+//! definition to scale.
+//!
+//! **The `demo-time` feature**: every window in this build is a fixed
+//! number of epochs (`RING_SLOTS`, `AGGREGATE_SLOTS_7D`,
+//! `MAX_CURE_EPOCHS`, and so on, none of which change below), built
+//! entirely out of how many SECONDS one epoch actually is. `EPOCH_SECS`
+//! and `SUB_EPOCH_GRID_SECS` are the only two constants in this whole
+//! module with a real "seconds" unit, and they are the only two this
+//! feature touches, both divided by the same factor (300, the largest
+//! that keeps `SUB_EPOCH_GRID_SECS` a whole number of seconds) so their
+//! ratio - and every window expressed as a multiple of either one -
+//! comes out identical in both builds. A contract built with this
+//! feature plays through the exact same sequence of epochs and windows
+//! as the normal build, just over minutes instead of weeks, for a live
+//! demo deployment. It must never reach a real deployment: see
+//! `RiskOracle::demo_build()`.
 
 use crate::network_limits::CONTRACT_DATA_ENTRY_SIZE_BYTES;
+
+/// One epoch, in seconds. technical-doc.md's own default throughout:
+/// the hourly ring, the Depeg/cure windows, and every bound below are
+/// all stated as a number of these. Scaled by the `demo-time` feature;
+/// see this module's own doc comment.
+#[cfg(not(feature = "demo-time"))]
+pub const EPOCH_SECS: u64 = 3_600;
+#[cfg(feature = "demo-time")]
+pub const EPOCH_SECS: u64 = 12;
 
 /// Number of slots in the per asset hourly ring buffer: the longest
 /// v1 depeg window (72h) plus the 7 day liquidity baseline before it,
@@ -66,8 +94,20 @@ pub const SUB_RING_SLOTS: u32 = 60;
 /// Section 5.9 S3. Every allowed `sub_epoch_secs` value is a multiple
 /// of this, so every sub-epoch's own start time always falls exactly
 /// on this grid, and a `sub_epoch_secs` change never needs to
-/// re-encode `Sub(asset)`.
+/// re-encode `Sub(asset)`. Scaled by the `demo-time` feature, by the
+/// same factor as `EPOCH_SECS`; see this module's own doc comment.
+#[cfg(not(feature = "demo-time"))]
 pub const SUB_EPOCH_GRID_SECS: u64 = 300;
+#[cfg(feature = "demo-time")]
+pub const SUB_EPOCH_GRID_SECS: u64 = 1;
+
+/// Build-time check: `EPOCH_SECS` is exactly 12 `SUB_EPOCH_GRID_SECS`
+/// units, in both builds. This is the "in proportion" guarantee the
+/// `demo-time` feature rests on - every other window in this module
+/// (and every contract's own window built as a multiple of either
+/// constant) comes out scaled by the identical factor as a result,
+/// never needing its own feature gate.
+const _: () = assert!(EPOCH_SECS == 12 * SUB_EPOCH_GRID_SECS);
 
 /// `sylox_types::assets::RingSlot`'s own packed width in `risk-oracle`
 /// and `Sub(asset)`'s own packed slot width (same encoding, Section

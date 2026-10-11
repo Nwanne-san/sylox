@@ -21,6 +21,7 @@ mod storage;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol, Vec,
 };
+use sylox_types::time::EPOCH_SECS;
 use sylox_types::{AssetConfig, Band, EndpointStatus, RingSlot, RiskScore, SignalSet, SCALE};
 
 use clients::{FxAdapterClient, GovernorClient, PriceAdapterClient, StakingClient};
@@ -29,17 +30,15 @@ use score::{Formula, AGGREGATE_SLOTS_7D};
 use storage::DisputeRecord;
 
 /// Signal posting window: how far back a closed epoch may still be posted.
-/// technical-doc.md Section 5.2, Section 23 `window_secs` default.
-const WINDOW_SECS: u64 = 259_200;
-
-/// Default epoch length. technical-doc.md Section 23 `epoch_secs`. Frozen
-/// for v1 alongside `storage::RING_SLOTS`, not a governance parameter: see
-/// the PR's "Spec deviations" section.
-const EPOCH_SECS: u64 = 3_600;
+/// technical-doc.md Section 5.2, Section 23 `window_secs` default: 72
+/// epochs. Written as a multiple of `EPOCH_SECS`, not its own literal,
+/// so the `demo-time` feature (`sylox_types::time`) scales it along
+/// with everything else built the same way, never needing its own gate.
+const WINDOW_SECS: u64 = 72 * EPOCH_SECS;
 
 /// Default signal dispute window. technical-doc.md Section 23
-/// `signal_dispute_secs`.
-const SIGNAL_DISPUTE_SECS: u64 = 7_200;
+/// `signal_dispute_secs`: 2 epochs.
+const SIGNAL_DISPUTE_SECS: u64 = 2 * EPOCH_SECS;
 
 /// ADR-010 amendment (feat/event-registry PR #15 review, finding F1):
 /// how long the committee has to rule on an open signal dispute, from
@@ -54,7 +53,8 @@ const SIGNAL_DISPUTE_SECS: u64 = 7_200;
 /// assertion below. At 7 days the worst case was 242h, already past
 /// the 240h ring: a keeper's own still-open dispute could be silently
 /// overwritten by the ring wrapping around before anyone ruled.
-const SIGNAL_DISPUTE_RULING_SECS: u64 = 518_400;
+/// 144 epochs.
+const SIGNAL_DISPUTE_RULING_SECS: u64 = 144 * EPOCH_SECS;
 
 /// ADR-010 amendment (finding F1): the worst-case dispute timeline —
 /// posted at the last legal instant, disputed immediately, never
@@ -108,18 +108,30 @@ const SUPPLY_CHANGE_TOLERANCE_BPS: i128 = 1;
 /// `set_sub_epoch_secs`: no `SubEpochConfig(asset)` entry exists, and
 /// `post_sub_signals` has nothing to post against, so the asset
 /// behaves exactly as it did before this revision (hourly `post_signals`
-/// only). This constant is only ever used to compute `3,600 /
+/// only). This constant is only ever used to compute `EPOCH_SECS /
 /// SUB_EPOCH_SECS_DEFAULT` sizing and validation; it is never written
 /// as an implicit `SubEpochConfig` default (see `current_sub_epoch_secs`).
-const SUB_EPOCH_SECS_DEFAULT: u64 = 300;
+/// The same value as `sylox_types::time::SUB_EPOCH_GRID_SECS`, by
+/// definition - this is that same 5 minute floor, just under its own
+/// name here for the doc comment above to read naturally.
+const SUB_EPOCH_SECS_DEFAULT: u64 = sylox_types::time::SUB_EPOCH_GRID_SECS;
 
 /// Section 5.9 S1: the only values `set_sub_epoch_secs` accepts, each
-/// dividing `EPOCH_SECS` (3,600) evenly.
-const SUB_EPOCH_SECS_ALLOWED: [u64; 6] = [300, 600, 900, 1_200, 1_800, 3_600];
+/// a whole multiple of `SUB_EPOCH_GRID_SECS` and each dividing
+/// `EPOCH_SECS` evenly (1, 2, 3, 4, 6 and 12 times the grid - at the
+/// defaults, 300/600/900/1,200/1,800/3,600).
+const SUB_EPOCH_SECS_ALLOWED: [u64; 6] = [
+    sylox_types::time::SUB_EPOCH_GRID_SECS,
+    2 * sylox_types::time::SUB_EPOCH_GRID_SECS,
+    3 * sylox_types::time::SUB_EPOCH_GRID_SECS,
+    4 * sylox_types::time::SUB_EPOCH_GRID_SECS,
+    6 * sylox_types::time::SUB_EPOCH_GRID_SECS,
+    12 * sylox_types::time::SUB_EPOCH_GRID_SECS,
+];
 
 /// Section 5.9 S2: how long a sub-epoch can be backfilled before the
-/// keeper must fall back to the hourly path.
-const SUB_BACKFILL_SECS: u64 = 7_200;
+/// keeper must fall back to the hourly path. 2 epochs.
+const SUB_BACKFILL_SECS: u64 = 2 * EPOCH_SECS;
 
 /// Section 5.9 S4: the fraction of an hour's sub-epochs that must be
 /// Final for the hour to count as present once built, rather than
@@ -152,7 +164,8 @@ const _: () = assert!(SUB_BACKFILL_SECS + SIGNAL_DISPUTE_SECS + EPOCH_SECS <= SU
 /// `Staking::params::SECONDS_PER_LEDGER` (5s), the same fixed
 /// assumption every TTL computation in this workspace uses.
 const SECONDS_PER_LEDGER: u64 = 5;
-const SUB_DISPUTE_TTL_MARGIN_SECS: u64 = 86_400;
+/// 24 epochs (1 day at the defaults).
+const SUB_DISPUTE_TTL_MARGIN_SECS: u64 = 24 * EPOCH_SECS;
 const SUB_DISPUTE_TTL_LEDGERS: u32 =
     ((SIGNAL_DISPUTE_RULING_SECS + SUB_DISPUTE_TTL_MARGIN_SECS) / SECONDS_PER_LEDGER) as u32;
 
@@ -194,6 +207,20 @@ impl RiskOracle {
     /// actually deployed without guessing from a wasm hash.
     pub fn version(_env: Env) -> u32 {
         CONTRACT_VERSION
+    }
+
+    /// Whether this exact binary was built with the `demo-time`
+    /// feature (`sylox_types::time`'s own doc comment): `true` only
+    /// for a demo deployment's own wasm, `false` for every real one,
+    /// a pure `cfg!` check of what was actually compiled in, not a
+    /// stored flag anything could set after the fact. CI's own
+    /// `demo-time-not-in-release` job builds the normal release wasm
+    /// (no `--features`, same command `deploy/deploy.sh testnet`
+    /// uses) and calls this against it, failing the build if it ever
+    /// reads anything but `false` - the one thing standing between a
+    /// demo's compressed windows and a real deployment.
+    pub fn demo_build(_env: Env) -> bool {
+        cfg!(feature = "demo-time")
     }
 
     /// technical-doc.md Section 17.3: "Core contracts expose

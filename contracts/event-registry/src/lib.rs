@@ -74,17 +74,13 @@ pub use error::Error;
 use storage::Config;
 
 use clients::{GovernorClient, MarketFactoryClient, RiskOracleClient, StakingClient};
-
-/// Epoch length. Frozen for v1 (technical-doc.md Section 23); mirrors
-/// `RiskOracle`'s own private `EPOCH_SECS`, which `EventRegistry`
-/// cannot reach directly (separate contract crate), the same
-/// duplication `Staking::params::EPOCH_SECS` already carries.
-const EPOCH_SECS: u64 = 3_600;
+use sylox_types::time::EPOCH_SECS;
 
 /// Backfill window: how long after an epoch's own close a keeper may
-/// still post it (ADR-005). Mirrors `RiskOracle`'s own private
-/// `WINDOW_SECS`.
-const WINDOW_SECS: u64 = 259_200;
+/// still post it (ADR-005). Mirrors `RiskOracle`'s own `WINDOW_SECS`:
+/// both read the same shared `EPOCH_SECS`, so the two can never
+/// silently drift apart. 72 epochs.
+const WINDOW_SECS: u64 = 72 * EPOCH_SECS;
 
 /// IssuerFreeze's own fixed 7 day window (Section 8.2), and the Depeg
 /// liquidity baseline immediately before its own window (ADR-005):
@@ -1281,10 +1277,10 @@ fn cure_outcome(
 
 /// technical-doc.md Section 23 defaults, used when the asset has no
 /// registered definition of that kind (Section 9.4's own stated
-/// fallback rule).
-const DEFAULT_DEPEG_WINDOW_SECS: u64 = 259_200;
+/// fallback rule). Both windows are 72 epochs.
+const DEFAULT_DEPEG_WINDOW_SECS: u64 = 72 * EPOCH_SECS;
 const DEFAULT_DEPEG_THRESHOLD: i128 = 9_500_000;
-const DEFAULT_HALT_WINDOW_SECS: u64 = 259_200;
+const DEFAULT_HALT_WINDOW_SECS: u64 = 72 * EPOCH_SECS;
 
 enum DepegCheck {
     Clear,

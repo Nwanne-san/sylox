@@ -2,6 +2,7 @@ extern crate std;
 
 mod golden_vectors;
 mod property;
+mod release_wasm;
 mod sub_epochs;
 
 use soroban_sdk::{
@@ -3306,6 +3307,32 @@ fn version_reads_contract_version_constant() {
     let env = Env::default();
     let fixture = setup(&env);
     assert_eq!(fixture.client.version(), crate::CONTRACT_VERSION);
+}
+
+/// CI's own `demo-time-not-in-release` job proves this against the
+/// real release wasm, not this test harness; this test proves the
+/// other half - that `cfg!` actually tracks the feature at all,
+/// across both configurations `cargo test` can be run under. Without
+/// `--features demo-time` (every normal run, including CI's own
+/// `cargo test --workspace`), this must read `false`.
+#[test]
+fn demo_build_is_false_without_the_demo_time_feature() {
+    let env = Env::default();
+    let fixture = setup(&env);
+    assert!(!fixture.client.demo_build());
+}
+
+/// The other side: compiled in ONLY when this crate itself is built
+/// with `--features demo-time` (`cargo test -p risk-oracle --features
+/// demo-time`), so a normal test run never even sees it - confirms
+/// the flag actually flips `demo_build()`, not just that the false
+/// case reads false.
+#[cfg(feature = "demo-time")]
+#[test]
+fn demo_build_is_true_with_the_demo_time_feature() {
+    let env = Env::default();
+    let fixture = setup(&env);
+    assert!(fixture.client.demo_build());
 }
 
 /// Non-governor cannot upgrade: same native auth trap as every other
