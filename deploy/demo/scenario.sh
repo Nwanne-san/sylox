@@ -387,6 +387,12 @@ $out"
 fi
 record_tx "action signal posted (epoch $action_epoch)" "$(tx_hash_from "$out")"
 
+# check_issuer_freeze only sums clawback/revocation data from FINAL
+# slots in its 168-epoch window - the action signal just posted is
+# still Pending (signal_dispute_secs, 2 * EPOCH_SECS, hasn't elapsed
+# yet), so calling propose_tier1 immediately counts zero actions and
+# fails closed with Tier1CheckFailed, every time.
+sleep "$(( 2 * EPOCH_SECS ))"
 out="$(invoke_submit "$ER_ID" "$DEMO_ADMIN" propose_tier1 --caller "$DEMO_ADMIN_ADDR" --asset "$DMFRZ_ID" --kind '"IssuerFreeze"' --version 1)"
 die_on_invoke_error "$out" "propose_tier1"
 EVENT_ID="$(return_value_from "$out")"
