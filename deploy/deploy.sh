@@ -288,7 +288,7 @@ $deploy_out"
   log "minted $DEMO_KEEPER_BOND DMUSD to the demo keeper"
 
   log "[5/8] Precomputing contract addresses (constructor flow, deploy.sh testnet's own technique)"
-  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v6"
+  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v7"
   salt_for_demo() {
     local contract="$1"
     echo -n "${CONSTRUCTOR_NONCE_DEMO}-${contract}" | shasum -a 256 | cut -d' ' -f1
@@ -473,7 +473,21 @@ $post_out"
   log "RiskOracle.post_signals: immediate backfill posted and caught up to real time, epochs $SEED_EPOCH..$((next_to_post - 1))"
 
   DEMO_START="$(date -u +%s)"
-  DEMO_EXPIRY=$(( DEMO_START + 3600 ))
+  # Series.deposit/quote/buy_cover all close at sale_end = expiry -
+  # SALE_CUTOFF_SECS (72 * EPOCH_SECS), a FIXED contract constant this
+  # feature keeps at the same epoch count in both builds - a 3,600s
+  # expiry here (1 real hour, unscaled) put sale_end 720s BEFORE start
+  # itself, closing the series before anyone could ever deposit.
+  # scenario.sh's own buy_cover (step 4) also cannot run until its
+  # 168-epoch RiskOracle history is built, up to 96 * EPOCH_SECS of
+  # real waiting in the worst case (a scenario.sh run starting right
+  # after a fresh deploy.sh, with none of that wait already elapsed).
+  # The selling window before sale_end must outlast that worst case
+  # PLUS the 72-epoch sale cutoff itself - exactly 168 * EPOCH_SECS,
+  # the same span the history requirement itself needs - with a 3x
+  # margin against real-world slack (RPC retries, finality cascades,
+  # whatever delay passes between running deploy.sh and scenario.sh).
+  DEMO_EXPIRY=$(( DEMO_START + 3 * 168 * EPOCH_SECS ))
   DEMO_CLAIM_WINDOW=600
   DEMO_TERMS="{\"asset\":\"$DMFRZ_ID\",\"def_versions\":{\"IssuerFreeze\":1},\"settlement\":\"$DMUSD_ID\",\"start\":$DEMO_START,\"expiry\":$DEMO_EXPIRY,\"claim_window_secs\":$DEMO_CLAIM_WINDOW,\"cap\":\"1000000000000000\",\"max_cover_per_buyer\":\"1000000000000000\",\"require_holding\":false,\"fee_bps\":750}"
   SERIES_ID="$("$STELLAR_BIN" contract invoke --id "$MF_ID" --source-account "$DEMO_ADMIN" --network testnet -- open_series --terms "$DEMO_TERMS" | tail -1)"

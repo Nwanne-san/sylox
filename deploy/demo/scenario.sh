@@ -112,10 +112,24 @@ record_tx() {
 # on stdout. Callers pull the real return value (the last line) and
 # the transaction hash (grep, the same technique deploy/demo-asset-
 # trigger.sh already uses for classic operations) from the SAME
-# capture, never submitting twice to get both.
+# capture, never submitting twice to get both. Retries a plain
+# transient RPC error (the same narrow signature list post-demo-
+# signals.sh's own is_transient_error documents, plus "Request
+# timeout", observed this session against this exact public testnet
+# RPC on a long-running deployment) - never a real rejection, which
+# this still returns on the first attempt for the caller to see.
 invoke_submit() {
   local contract="$1" source="$2"; shift 2
-  "$STELLAR_BIN" contract invoke --id "$contract" --source-account "$source" --network testnet -- "$@" 2>&1
+  local out attempt
+  for attempt in 1 2 3; do
+    out="$("$STELLAR_BIN" contract invoke --id "$contract" --source-account "$source" --network testnet -- "$@" 2>&1)"
+    if ! echo "$out" | grep -qi "Request timeout\|transaction submission timeout\|error reading a body from connection\|client error (SendRequest)\|client error (Connect)\|txBadSeq"; then
+      break
+    fi
+    log "invoke $1 (attempt $attempt/3): transient RPC error, retrying"
+    sleep 3
+  done
+  echo "$out"
 }
 invoke_read() {
   local contract="$1" source="$2"; shift 2
@@ -182,50 +196,65 @@ RATE_BPS=500   # 5% annualized
 out="$(invoke_submit "$SERIES_ID" "$SELLER" quote --seller "$SELLER_ADDR" --rate_bps "$RATE_BPS" --available "$SELLER_COLLATERAL")"
 record_tx "quote ($RATE_BPS bps)" "$(tx_hash_from "$out")"
 
+# Shared retry wrapper for any RiskOracle.post_signals call (both the
+# history backfill below and the real action signal in step 6).
+# Retries on two distinct conditions, each needing a different sleep:
+#
+# The finality backlog cascade: the history backfill posts far faster
+# than signal_dispute_secs (2 epochs), building a real backlog of
+# Pending epochs that all cross to Final at once, the moment the
+# oldest one clears. The CLI's footprint is fixed at simulate time, a
+# little before real submission, so landing on either side of that
+# one cascade instant changes how many epochs need reading, and a
+# short retry almost always lands on the same side again - the sleep
+# is a full signal_dispute_secs (2 * EPOCH_SECS) so the backlog is
+# unambiguously settled by the next attempt.
+#
+# A plain transient RPC error (the same narrow signature list post-
+# demo-signals.sh's own is_transient_error documents, plus "Request
+# timeout", observed this session against this exact public testnet
+# RPC): a short 3s retry, never a real rejection.
+#
+# EpochAlreadyPosted is treated as success. Any other failure, or
+# exhausting every attempt, returns 1 with the last output echoed, so
+# the caller can die with its own epoch/context in the message.
+post_signals_with_retry() {
+  local signal_set="$1" label="$2"
+  local out attempt
+  for attempt in 1 2 3 4; do
+    out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
+      -- post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)"
+    if ! echo "$out" | grep -qi "error"; then
+      echo "$out"; return 0
+    fi
+    if echo "$out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
+      echo "$out"; return 0
+    fi
+    if echo "$out" | grep -qi "exceeded_limit\|outside of the footprint"; then
+      log "post_signals ($label): finality backlog cascade (attempt $attempt/4), waiting $(( 2 * EPOCH_SECS ))s for it to settle"
+      sleep "$(( 2 * EPOCH_SECS ))"
+      continue
+    fi
+    if echo "$out" | grep -qi "Request timeout\|transaction submission timeout\|error reading a body from connection\|client error (SendRequest)\|client error (Connect)\|txBadSeq"; then
+      log "post_signals ($label): transient RPC error (attempt $attempt/4), retrying"
+      sleep 3
+      continue
+    fi
+    echo "$out"; return 1
+  done
+  echo "$out"; return 1
+}
+
 post_history_signal() {
   local epoch="$1"
   local inputs_hash
   inputs_hash="$(printf 'scenario-history-%s' "$epoch" | sha256sum | cut -d' ' -f1)"
   local signal_set="{\"epoch\":$epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"10000000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
-  local out attempt
-  # Same finality backlog cascade deploy.sh testnet-demo's own
-  # post_seed_signal already documents in detail: the immediate
-  # backfill loop below posts far faster than signal_dispute_secs (2
-  # epochs), building a real backlog of Pending epochs that all cross
-  # to Final at once, the moment the oldest one clears. The CLI's
-  # footprint is fixed at simulate time, a little before real
-  # submission, so landing on either side of that one cascade instant
-  # changes how many epochs need reading, and a short retry almost
-  # always lands on the same side again. The sleep here is a full
-  # signal_dispute_secs (2 * EPOCH_SECS) so the backlog is
-  # unambiguously settled by the next attempt.
-  for attempt in 1 2 3 4; do
-    out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
-      -- post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)" || true
-    if echo "$out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
-      return 0
-    fi
-    if ! echo "$out" | grep -qi "error"; then
-      return 0
-    fi
-    if echo "$out" | grep -qi "exceeded_limit\|outside of the footprint"; then
-      log "post_signals (epoch $epoch): finality backlog cascade (attempt $attempt/4), waiting $(( 2 * EPOCH_SECS ))s for it to settle"
-      sleep "$(( 2 * EPOCH_SECS ))"
-      continue
-    fi
-    if echo "$out" | grep -qi "Request timeout\|transaction submission timeout\|error reading a body from connection\|client error (SendRequest)\|client error (Connect)\|txBadSeq"; then
-      # Same transient-vs-real distinction post-demo-signals.sh's own
-      # is_transient_error already documents: a network hiccup against
-      # the public testnet RPC, never a real rejection.
-      log "post_signals (epoch $epoch): transient RPC error (attempt $attempt/4), retrying"
-      sleep 3
-      continue
-    fi
-    die "post_signals (epoch $epoch) failed:
+  local out
+  if ! out="$(post_signals_with_retry "$signal_set" "epoch $epoch")"; then
+    die "post_signals (epoch $epoch) failed after 4 attempts:
 $out"
-  done
-  die "post_signals (epoch $epoch) failed after 4 attempts:
-$out"
+  fi
 }
 
 log "[3/9] Building RiskOracle's real 168-epoch history for DMFRZ (this is the slow step; see this script's own header comment)"
@@ -294,10 +323,10 @@ action_epoch=$(( $(date -u +%s) / EPOCH_SECS ))
 sleep "$EPOCH_SECS"
 action_epoch=$(( $(date -u +%s) / EPOCH_SECS - 1 ))
 action_signal="{\"epoch\":$action_epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"10000000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":1,\"clawback_amount\":\"$REAL_CLAWBACK_AMOUNT\",\"auth_revocations\":1,\"flag_changes\":1},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$(printf '%s:%s' "$REVOKE_TX_HASH" "$CLAWBACK_TX_HASH" | sha256sum | cut -d' ' -f1)\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
-out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
-  -- post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$action_signal" 2>&1)" \
-  || die "posting the real action signal failed:
+if ! out="$(post_signals_with_retry "$action_signal" "action epoch $action_epoch")"; then
+  die "posting the real action signal failed:
 $out"
+fi
 record_tx "action signal posted (epoch $action_epoch)" "$(tx_hash_from "$out")"
 
 out="$(invoke_submit "$ER_ID" "$DEMO_ADMIN" propose_tier1 --caller "$DEMO_ADMIN_ADDR" --asset "$DMFRZ_ID" --kind '"IssuerFreeze"' --version 1)"
