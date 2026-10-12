@@ -170,6 +170,37 @@ if [[ "$NETWORK" == "testnet-demo" ]]; then
   if [[ "$got_version" != "$REQUIRED_STELLAR_VERSION" ]]; then
     die "stellar CLI version mismatch: need $REQUIRED_STELLAR_VERSION (CI's pinned version), found $got_version. Set STELLAR_CLI_BIN to the pinned binary."
   fi
+  # Polls Soroban RPC's own getTransaction for a terminal status.
+  # NOT_FOUND right after submission (before the node has ingested the
+  # ledger the transaction closed in) is expected and retried; anything
+  # else terminal (SUCCESS/FAILED) stops the poll immediately. Every
+  # contract invoke write below goes through this, after --send=yes
+  # (never the CLI's own "simulate, maybe send" default) and requiring
+  # a real transaction hash in the result - never trusting the CLI's
+  # own stdout alone. Found the hard way: an invoke whose own printed
+  # output looked exactly like a success (a real-looking transaction
+  # hash, "Transaction submitted successfully!") corresponded to no
+  # on-chain effect at all, because it was actually a rejected call
+  # (Error(Contract, #115)) whose own diagnostic text happened to
+  # contain a 64 hex character string this script's own hash-matching
+  # regex matched - not a CLI bug, but exactly the class of silent
+  # failure this confirmation step now catches regardless of cause.
+  confirm_tx() {
+    local hash="$1" attempt status_json status
+    for attempt in 1 2 3 4 5 6 7 8; do
+      status_json="$(curl -sS "$RPC_URL" -X POST -H 'Content-Type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTransaction\",\"params\":{\"hash\":\"$hash\"}}" 2>&1)"
+      status="$(echo "$status_json" | jq -r '.result.status // "UNKNOWN"' 2>/dev/null)"
+      case "$status" in
+        SUCCESS) return 0 ;;
+        FAILED) echo "$status_json" >&2; return 1 ;;
+        *) sleep 2 ;;
+      esac
+    done
+    echo "$status_json" >&2
+    return 1
+  }
+
   log "stellar CLI: $got_version (matches CI's pin)"
   if ! curl -sSf -X POST "$RPC_URL" -H 'Content-Type: application/json' \
        -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' >/dev/null; then
@@ -280,8 +311,15 @@ $deploy_out"
 
   mint_dmusd() {
     local to_addr="$1" amount="$2"
-    "$STELLAR_BIN" contract invoke --id "$DMUSD_ID" --source-account "$DEMO_ISSUER" \
-      --network testnet -- mint --to "$to_addr" --amount "$amount" >/dev/null
+    local out hash
+    out="$("$STELLAR_BIN" contract invoke --send=yes --id "$DMUSD_ID" --source-account "$DEMO_ISSUER" \
+      --network testnet -- mint --to "$to_addr" --amount "$amount" 2>&1)"
+    echo "$out" | grep -qi "error" && die "mint to $to_addr failed:
+$out"
+    hash="$(echo "$out" | grep -oE '[a-f0-9]{64}' | head -1)"
+    [[ -n "$hash" ]] || die "mint to $to_addr returned no transaction hash:
+$out"
+    confirm_tx "$hash" || die "mint to $to_addr: transaction $hash did not confirm SUCCESS on-chain"
   }
   DEMO_KEEPER_BOND=50000000000  # params::KEEPER_BOND: an economic parameter, not a time one, unaffected by demo-time.
   mint_dmusd "$DEMO_KEEPER_ADDR" "$DEMO_KEEPER_BOND"
@@ -356,7 +394,15 @@ $deploy_out"
 
   invoke_demo() {
     local contract="$1" source="$2"; shift 2
-    "$STELLAR_BIN" contract invoke --id "$contract" --source-account "$source" --network testnet -- "$@"
+    local out hash
+    out="$("$STELLAR_BIN" contract invoke --send=yes --id "$contract" --source-account "$source" --network testnet -- "$@" 2>&1)"
+    echo "$out" | grep -qi "error" && die "invoke $1 on $contract failed:
+$out"
+    hash="$(echo "$out" | grep -oE '[a-f0-9]{64}' | head -1)"
+    [[ -n "$hash" ]] || die "invoke $1 on $contract returned no transaction hash:
+$out"
+    confirm_tx "$hash" || die "invoke $1 on $contract: transaction $hash did not confirm SUCCESS on-chain"
+    echo "$out"
   }
 
   log "[7/8] Protocol setup: keeper, asset, definition, related sellers, one signal, open_series"
@@ -417,7 +463,13 @@ $deploy_out"
     local inputs_hash
     inputs_hash="$(printf 'deploy-demo-seed-%s' "$epoch" | sha256sum | cut -d' ' -f1)"
     local signal_set="{\"epoch\":$epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"$LIQUIDITY\",\"redemption_net\":\"0\",\"supply\":\"$SUPPLY\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
-    local post_out attempt
+    local post_out hash attempt
+    # Bypasses invoke_demo on purpose: that helper now dies on the
+    # first sign of "error" (the general hardening every other write
+    # in this script needs), but this loop's own #103/#115/cascade/
+    # transient cases below are expected, tolerable outcomes, not
+    # fatal ones - each needs its own decision, not a blanket die.
+    #
     # This loop posts far faster than signal_dispute_secs (2 epochs),
     # so a real backlog of Pending epochs builds up between flushes.
     # post_signals' own finality scan (try_advance_finality) crosses
@@ -437,9 +489,9 @@ $deploy_out"
     # the real EPOCH_SECS (3,600s), where backfill posts once per
     # epoch, never racing far enough ahead to build a backlog at all.
     for attempt in 1 2 3 4; do
-      if post_out="$(invoke_demo "$RO_ID" "$DEMO_KEEPER" post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)"; then
-        return 0
-      elif echo "$post_out" | grep -qi "Error(Contract, #103)\|Error(Contract, #115)\|EpochAlreadyPosted\|HourAlreadyPosted"; then
+      post_out="$("$STELLAR_BIN" contract invoke --send=yes --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
+        -- post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)"
+      if echo "$post_out" | grep -qi "Error(Contract, #103)\|Error(Contract, #115)\|EpochAlreadyPosted\|HourAlreadyPosted"; then
         # #103 (EpochAlreadyPosted) and #115 (HourAlreadyPosted, this
         # hour already posted via the sub-epoch path instead) both
         # mean this hour already has real data - post-demo-signals.sh's
@@ -458,9 +510,15 @@ $deploy_out"
         # aborting the whole deployment over one flaky round trip.
         log "post_signals (epoch $epoch): transient RPC error (attempt $attempt/4), retrying"
         sleep 3
-      else
+      elif echo "$post_out" | grep -qi "error"; then
         die "post_signals (epoch $epoch) failed:
 $post_out"
+      else
+        hash="$(echo "$post_out" | grep -oE '[a-f0-9]{64}' | head -1)"
+        [[ -n "$hash" ]] || die "post_signals (epoch $epoch) returned no transaction hash:
+$post_out"
+        confirm_tx "$hash" || die "post_signals (epoch $epoch): transaction $hash did not confirm SUCCESS on-chain"
+        return 0
       fi
     done
     die "post_signals (epoch $epoch) failed after 4 attempts:
@@ -504,7 +562,7 @@ $post_out"
   DEMO_EXPIRY=$(( DEMO_START + 3 * 168 * EPOCH_SECS ))
   DEMO_CLAIM_WINDOW=600
   DEMO_TERMS="{\"asset\":\"$DMFRZ_ID\",\"def_versions\":{\"IssuerFreeze\":1},\"settlement\":\"$DMUSD_ID\",\"start\":$DEMO_START,\"expiry\":$DEMO_EXPIRY,\"claim_window_secs\":$DEMO_CLAIM_WINDOW,\"cap\":\"1000000000000000\",\"max_cover_per_buyer\":\"1000000000000000\",\"require_holding\":false,\"fee_bps\":750}"
-  SERIES_ID="$("$STELLAR_BIN" contract invoke --id "$MF_ID" --source-account "$DEMO_ADMIN" --network testnet -- open_series --terms "$DEMO_TERMS" | tail -1)"
+  SERIES_ID="$(invoke_demo "$MF_ID" "$DEMO_ADMIN" open_series --terms "$DEMO_TERMS" | tail -1)"
   # This CLI version prints an Address-typed return value JSON-quoted
   # ("C...") rather than bare, unlike the precomputed addresses
   # elsewhere in this script (from `contract id wasm`, never quoted).
