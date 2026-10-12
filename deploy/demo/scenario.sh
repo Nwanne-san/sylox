@@ -98,7 +98,13 @@ DEMO_KEEPER=sylox-demo-time-keeper
 # this cannot just be imported.
 EPOCH_SECS=60
 WINDOW_SECS=4320
-SUB_EPOCH_GRID_SECS=5
+# DMFRZ's own sub_epoch_secs, set by deploy.sh testnet-demo's own
+# RiskOracle.set_sub_epoch_secs call - NOT the protocol's demo-time
+# default (SUB_EPOCH_GRID_SECS, 5s), which is shorter than a single
+# write-confirm round trip and leaves buy_cover's own feed-freshness
+# post already stale on arrival. See deploy.sh's own comment there for
+# the measurement this is sized against.
+DMFRZ_SUB_EPOCH_SECS=$EPOCH_SECS
 
 TX_LINKS=()
 record_tx() {
@@ -443,33 +449,28 @@ done
 
 log "[4/9] Buyer buys cover"
 # buy_cover's own check_feed_not_behind needs a sub-epoch posted
-# fresh (within feed_grace_secs), entirely separate from the hourly
-# history span above - the hourly backfill loop never touches the
-# CURRENT, still-open hour (it only ever posts now_epoch - 1), so
-# that hour's own sub-epochs are still free to post through here.
-# LAST_SUB_EPOCH_HOUR records exactly which hour this claims, so step
-# 6's action signal (also hourly) can avoid colliding with it: two
-# real bugs found the hard way from the SAME root cause (one hour, one
-# writer) - posting an hour already claimed this way fails closed with
-# #115, and if the real freeze sequence runs fast enough, the action
-# signal's own epoch can land on this exact hour.
+# fresh (within DMFRZ_SUB_EPOCH_SECS of now), entirely separate from
+# the hourly history span above. Posts the most recently CLOSED
+# sub-epoch globally (never the still-open current one), converted to
+# the (hour, sub) coordinates post_sub_signals addresses it by - with
+# DMFRZ_SUB_EPOCH_SECS == EPOCH_SECS (one sub-epoch per hour), that is
+# exactly the same hour the hourly backfill loop's own "now_epoch - 1"
+# targets. The backfill loop has already stopped by the time this
+# runs (it exits the moment span >= 168, never posting again), so in
+# the normal case nothing is racing for that hour - #103
+# (EpochAlreadyPosted) from a PRIOR call of this same function is
+# harmless (already live), but #115 (HourAlreadyPosted) would mean
+# something else claimed it via the hourly path instead, which this
+# treats as fatal since live() would never reflect hourly-only data.
 LAST_SUB_EPOCH_HOUR=0
 post_fresh_sub_epoch() {
-  local now hour elapsed sub sub_epoch_secs=$SUB_EPOCH_GRID_SECS
+  local sub_epoch_secs=$DMFRZ_SUB_EPOCH_SECS
+  local sub_epochs_per_hour=$(( EPOCH_SECS / sub_epoch_secs ))
+  local now global_closed hour sub
   now="$(date -u +%s)"
-  hour=$(( now / EPOCH_SECS ))
-  elapsed=$(( now - hour * EPOCH_SECS ))
-  sub=$(( elapsed / sub_epoch_secs - 1 ))
-  if (( sub < 0 )); then
-    # The current hour just started; its first sub-epoch hasn't
-    # closed yet. Wait for it rather than falling back to the
-    # previous hour, which the backfill loop has already claimed.
-    sleep "$sub_epoch_secs"
-    now="$(date -u +%s)"
-    hour=$(( now / EPOCH_SECS ))
-    elapsed=$(( now - hour * EPOCH_SECS ))
-    sub=$(( elapsed / sub_epoch_secs - 1 ))
-  fi
+  global_closed=$(( now / sub_epoch_secs - 1 ))
+  hour=$(( global_closed * sub_epoch_secs / EPOCH_SECS ))
+  sub=$(( global_closed % sub_epochs_per_hour ))
   LAST_SUB_EPOCH_HOUR=$hour
   local inputs_hash
   inputs_hash="$(printf 'scenario-sub-%s-%s' "$hour" "$sub" | sha256sum | cut -d' ' -f1)"
@@ -478,6 +479,13 @@ post_fresh_sub_epoch() {
   for attempt in 1 2 3; do
     out="$("$STELLAR_BIN" contract invoke --send=yes --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
       -- post_sub_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --hour "$hour" --sub "$sub" --s "$signal_set" 2>&1)"
+    if echo "$out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
+      return 0
+    fi
+    if echo "$out" | grep -qi "Error(Contract, #115)\|HourAlreadyPosted"; then
+      die "post_sub_signals (hour $hour sub $sub) failed: this hour was already posted via the hourly path, so live() can never reflect it - check whether the backfill loop above is still running:
+$out"
+    fi
     if echo "$out" | grep -qi "Request timeout\|transaction submission timeout\|error reading a body from connection\|client error (SendRequest)\|client error (Connect)\|txBadSeq"; then
       log "post_sub_signals (hour $hour sub $sub): transient RPC error (attempt $attempt/3), retrying"
       sleep 3
@@ -502,42 +510,25 @@ if [[ "$buyer_cover_balance" =~ ^[0-9]+$ ]] && (( buyer_cover_balance > 0 )); th
   log "buyer already holds $buyer_cover_balance of cover; skipping buy_cover"
   FILLED="$buyer_cover_balance"
 else
-  # Two independent staleness checks gate buy_cover, and either can
-  # trip between "history span is sufficient" and buy_cover actually
-  # landing on-chain:
-  #
-  # check_feed_not_behind's own tolerance is much tighter than
-  # feed_grace_secs (120) suggests: it only accepts the CURRENT closed
-  # sub-epoch or exactly one before it, each a sub_epoch_secs-wide
-  # window (5s in this build) - feed_grace_secs only extends the
-  # ONE-behind case, it does not widen how many sub-epochs stale is
-  # tolerable (Error(Contract, #517) FeedBehind).
-  #
-  # RiskOracle.is_stale tolerates only STALE_AFTER_EPOCHS (3, 180s in
-  # this build) of lag on the hourly ring's own newest posted epoch
-  # (Error(Contract, #501) AssetStale) - the backfill loop above keeps
-  # this fresh only up to the moment it declares "ready to sell
-  # cover," not through whatever real time this retry loop itself
-  # spends.
-  #
-  # invoke_confirmed's own on-chain confirmation step adds real
-  # latency on every attempt, easily enough to trip either one even
-  # right after refreshing both - so every attempt refreshes both the
-  # sub-epoch feed and the hourly signal and retries the pair with
-  # buy_cover, never buy_cover alone, until one lands inside both real
-  # windows at once.
-  for attempt in 1 2 3 4 5; do
+  # check_feed_not_behind needs a sub-epoch posted within
+  # DMFRZ_SUB_EPOCH_SECS of now (Error(Contract, #517) FeedBehind
+  # otherwise) - sized (deploy.sh's own comment on set_sub_epoch_secs)
+  # to comfortably clear a real write-confirm round trip, so this
+  # should succeed on the first attempt in the normal case. Retries
+  # narrowly on FeedBehind alone, posting one fresh sub-epoch first
+  # each time, at most 3 attempts total: any OTHER failure here is a
+  # real rejection, not staleness, and must not be retried away.
+  for attempt in 1 2 3; do
     post_fresh_sub_epoch
-    post_history_signal $(( $(date -u +%s) / EPOCH_SECS - 1 ))
-    log "refreshed the sub-epoch feed (hour $LAST_SUB_EPOCH_HOUR) and the hourly signal, buy_cover attempt $attempt/5"
+    log "posted a fresh sub-epoch feed (hour $LAST_SUB_EPOCH_HOUR), buy_cover attempt $attempt/3"
     if out="$(invoke_confirmed "$SERIES_ID" "$BUYER" buy_cover --buyer "$BUYER_ADDR" --amount "$BUY_AMOUNT" --max_rate_bps "$RATE_BPS")"; then
       break
     fi
-    if (( attempt == 5 )) || ! echo "$out" | grep -qi "Error(Contract, #517)\|FeedBehind\|Error(Contract, #501)\|AssetStale"; then
+    if (( attempt == 3 )) || ! echo "$out" | grep -qi "Error(Contract, #517)\|FeedBehind"; then
       die "buy_cover failed:
 $out"
     fi
-    log "buy_cover (attempt $attempt/5): feed or history went stale before this landed - refreshing both and retrying"
+    log "buy_cover (attempt $attempt/3): FeedBehind, the feed went stale before this landed - reposting and retrying"
   done
   record_tx "buy_cover ($BUY_AMOUNT DMFRZ cover)" "$(tx_hash_from "$out")"
   BUY_RESULT="$(return_value_from "$out")"

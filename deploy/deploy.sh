@@ -417,6 +417,25 @@ $out"
   invoke_demo "$RO_ID" "$DEMO_ADMIN" add_asset --cfg "$ASSET_CFG" >/dev/null
   log "RiskOracle.add_asset: DMFRZ registered"
 
+  # check_feed_not_behind's own tolerance is tied to sub_epoch_secs:
+  # the demo-time default (SUB_EPOCH_GRID_SECS, 5s) is shorter than a
+  # single write-confirm round trip against the public testnet RPC -
+  # measured empirically this session at a ~10.8s median, ~12.1s
+  # worst of 10 real invoke_confirmed-style calls - so buy_cover's own
+  # feed-freshness post is already multiple sub-epochs stale the
+  # moment it lands, deterministically, regardless of retries. Sized
+  # per David's own rule (at least 3x the worst write time): 60s is
+  # the smallest SUB_EPOCH_SECS_ALLOWED value clearing 3 * 12.1s =
+  # 36.2s, with a comfortable ~5x margin instead of slowing every
+  # window (EPOCH_SECS itself stays 60s). Configured per-asset here
+  # rather than raising EPOCH_SECS, which would also slow the history
+  # wait, the challenge window and everything else. Takes effect at
+  # the NEXT hour boundary (set_sub_epoch_secs's own
+  # effective_from_hour), comfortably before scenario.sh ever reaches
+  # buy_cover given the backfill below takes real minutes regardless.
+  invoke_demo "$RO_ID" "$DEMO_ADMIN" set_sub_epoch_secs --asset "$DMFRZ_ID" --value "$EPOCH_SECS" >/dev/null
+  log "RiskOracle.set_sub_epoch_secs: DMFRZ sub_epoch_secs=${EPOCH_SECS}s (effective next hour)"
+
   # freeze_pct_bps=100 (1%), auth_revocation_threshold=0: same
   # thresholds deploy/demo-asset.sh registers for DEMOUSD, so even one
   # real revocation triggers (technical-doc.md Section 8.2: triggers
