@@ -502,28 +502,42 @@ if [[ "$buyer_cover_balance" =~ ^[0-9]+$ ]] && (( buyer_cover_balance > 0 )); th
   log "buyer already holds $buyer_cover_balance of cover; skipping buy_cover"
   FILLED="$buyer_cover_balance"
 else
+  # Two independent staleness checks gate buy_cover, and either can
+  # trip between "history span is sufficient" and buy_cover actually
+  # landing on-chain:
+  #
   # check_feed_not_behind's own tolerance is much tighter than
   # feed_grace_secs (120) suggests: it only accepts the CURRENT closed
   # sub-epoch or exactly one before it, each a sub_epoch_secs-wide
   # window (5s in this build) - feed_grace_secs only extends the
   # ONE-behind case, it does not widen how many sub-epochs stale is
-  # tolerable. invoke_confirmed's own on-chain confirmation step adds
-  # real latency between posting the feed and buy_cover actually
-  # executing, easily enough to fall two or more sub-epochs behind and
-  # hit Error(Contract, #517) FeedBehind even right after posting a
-  # fresh one - so this posts a new one and retries as a pair, never
-  # buy_cover alone, until one lands inside the real window.
+  # tolerable (Error(Contract, #517) FeedBehind).
+  #
+  # RiskOracle.is_stale tolerates only STALE_AFTER_EPOCHS (3, 180s in
+  # this build) of lag on the hourly ring's own newest posted epoch
+  # (Error(Contract, #501) AssetStale) - the backfill loop above keeps
+  # this fresh only up to the moment it declares "ready to sell
+  # cover," not through whatever real time this retry loop itself
+  # spends.
+  #
+  # invoke_confirmed's own on-chain confirmation step adds real
+  # latency on every attempt, easily enough to trip either one even
+  # right after refreshing both - so every attempt refreshes both the
+  # sub-epoch feed and the hourly signal and retries the pair with
+  # buy_cover, never buy_cover alone, until one lands inside both real
+  # windows at once.
   for attempt in 1 2 3 4 5; do
     post_fresh_sub_epoch
-    log "posted a fresh sub-epoch feed (hour $LAST_SUB_EPOCH_HOUR), buy_cover attempt $attempt/5"
+    post_history_signal $(( $(date -u +%s) / EPOCH_SECS - 1 ))
+    log "refreshed the sub-epoch feed (hour $LAST_SUB_EPOCH_HOUR) and the hourly signal, buy_cover attempt $attempt/5"
     if out="$(invoke_confirmed "$SERIES_ID" "$BUYER" buy_cover --buyer "$BUYER_ADDR" --amount "$BUY_AMOUNT" --max_rate_bps "$RATE_BPS")"; then
       break
     fi
-    if (( attempt == 5 )) || ! echo "$out" | grep -qi "Error(Contract, #517)\|FeedBehind"; then
+    if (( attempt == 5 )) || ! echo "$out" | grep -qi "Error(Contract, #517)\|FeedBehind\|Error(Contract, #501)\|AssetStale"; then
       die "buy_cover failed:
 $out"
     fi
-    log "buy_cover (attempt $attempt/5): FeedBehind, the feed went stale before this landed - reposting and retrying"
+    log "buy_cover (attempt $attempt/5): feed or history went stale before this landed - refreshing both and retrying"
   done
   record_tx "buy_cover ($BUY_AMOUNT DMFRZ cover)" "$(tx_hash_from "$out")"
   BUY_RESULT="$(return_value_from "$out")"
