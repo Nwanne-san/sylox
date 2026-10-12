@@ -95,16 +95,14 @@ DEMO_KEEPER=sylox-demo-time-keeper
 
 # Mirrors contracts/types/src/time.rs's own demo-time-scaled values;
 # see deploy/deploy.sh testnet-demo's own identical comment for why
-# this cannot just be imported.
+# this cannot just be imported. SUB_EPOCH_GRID_SECS deliberately does
+# NOT follow EPOCH_SECS's own 60x factor in the demo-time build - see
+# that module's own comment for why (a real measured write-confirm
+# round trip against testnet, and a pre-existing bug that makes
+# RiskOracle.set_sub_epoch_secs unable to fix this per asset instead).
 EPOCH_SECS=60
 WINDOW_SECS=4320
-# DMFRZ's own sub_epoch_secs, set by deploy.sh testnet-demo's own
-# RiskOracle.set_sub_epoch_secs call - NOT the protocol's demo-time
-# default (SUB_EPOCH_GRID_SECS, 5s), which is shorter than a single
-# write-confirm round trip and leaves buy_cover's own feed-freshness
-# post already stale on arrival. See deploy.sh's own comment there for
-# the measurement this is sized against.
-DMFRZ_SUB_EPOCH_SECS=$EPOCH_SECS
+SUB_EPOCH_GRID_SECS=60
 
 TX_LINKS=()
 record_tx() {
@@ -449,22 +447,22 @@ done
 
 log "[4/9] Buyer buys cover"
 # buy_cover's own check_feed_not_behind needs a sub-epoch posted
-# fresh (within DMFRZ_SUB_EPOCH_SECS of now), entirely separate from
+# fresh (within SUB_EPOCH_GRID_SECS of now), entirely separate from
 # the hourly history span above. Posts the most recently CLOSED
 # sub-epoch globally (never the still-open current one), converted to
 # the (hour, sub) coordinates post_sub_signals addresses it by - with
-# DMFRZ_SUB_EPOCH_SECS == EPOCH_SECS (one sub-epoch per hour), that is
-# exactly the same hour the hourly backfill loop's own "now_epoch - 1"
-# targets. The backfill loop has already stopped by the time this
-# runs (it exits the moment span >= 168, never posting again), so in
-# the normal case nothing is racing for that hour - #103
+# SUB_EPOCH_GRID_SECS == EPOCH_SECS in this build (one sub-epoch per
+# hour), that is exactly the same hour the hourly backfill loop's own
+# "now_epoch - 1" targets. The backfill loop has already stopped by
+# the time this runs (it exits the moment span >= 168, never posting
+# again), so in the normal case nothing is racing for that hour - #103
 # (EpochAlreadyPosted) from a PRIOR call of this same function is
 # harmless (already live), but #115 (HourAlreadyPosted) would mean
 # something else claimed it via the hourly path instead, which this
 # treats as fatal since live() would never reflect hourly-only data.
 LAST_SUB_EPOCH_HOUR=0
 post_fresh_sub_epoch() {
-  local sub_epoch_secs=$DMFRZ_SUB_EPOCH_SECS
+  local sub_epoch_secs=$SUB_EPOCH_GRID_SECS
   local sub_epochs_per_hour=$(( EPOCH_SECS / sub_epoch_secs ))
   local now global_closed hour sub
   now="$(date -u +%s)"
@@ -511,8 +509,8 @@ if [[ "$buyer_cover_balance" =~ ^[0-9]+$ ]] && (( buyer_cover_balance > 0 )); th
   FILLED="$buyer_cover_balance"
 else
   # check_feed_not_behind needs a sub-epoch posted within
-  # DMFRZ_SUB_EPOCH_SECS of now (Error(Contract, #517) FeedBehind
-  # otherwise) - sized (deploy.sh's own comment on set_sub_epoch_secs)
+  # SUB_EPOCH_GRID_SECS of now (Error(Contract, #517) FeedBehind
+  # otherwise) - sized (contracts/types/src/time.rs's own comment)
   # to comfortably clear a real write-confirm round trip, so this
   # should succeed on the first attempt in the normal case. Retries
   # narrowly on FeedBehind alone, posting one fresh sub-epoch first

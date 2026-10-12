@@ -46,6 +46,26 @@
 //! deploy/demo/scenario.sh's own history-building step needs scaling
 //! up by the same 5x (still far short of the real deployment's own
 //! multi-day wait).
+//!
+//! **Why `SUB_EPOCH_GRID_SECS` breaks from the same 60x factor
+//! (demo-time only).** Also found by a real testnet run:
+//! `Series::check_feed_not_behind` needs a sub-epoch posted within
+//! one `sub_epoch_secs` of now, and a single real post-and-confirm
+//! round trip against the public testnet RPC measured at a ~10.8s
+//! median, ~12.1s worst of 10 - longer than `SUB_EPOCH_GRID_SECS`
+//! would be at the same 60x factor as `EPOCH_SECS` (5s), so a post
+//! was already stale by the time it confirmed, deterministically,
+//! never a timing race retrying could win. `SUB_EPOCH_GRID_SECS =
+//! EPOCH_SECS` (60s, a 5x margin over that worst case) fixes it
+//! without slowing `EPOCH_SECS` itself and, with it, every other
+//! window (the history wait, the challenge window) that does not
+//! need to change. This cannot be fixed per asset at deploy time
+//! (`RiskOracle::set_sub_epoch_secs`) because `check_feed_not_behind`
+//! reads `sub_epoch_config(asset).sub_epoch_secs` directly - the
+//! field `set_sub_epoch_secs` itself never updates, only
+//! `pending_sub_epoch_secs` does, so that call has no effect on this
+//! check in either build; a real, pre-existing gap in already-merged
+//! code, filed separately rather than fixed here.
 use crate::network_limits::CONTRACT_DATA_ENTRY_SIZE_BYTES;
 
 /// One epoch, in seconds. technical-doc.md's own default throughout:
@@ -112,15 +132,23 @@ pub const SUB_RING_SLOTS: u32 = 60;
 #[cfg(not(feature = "demo-time"))]
 pub const SUB_EPOCH_GRID_SECS: u64 = 300;
 #[cfg(feature = "demo-time")]
-pub const SUB_EPOCH_GRID_SECS: u64 = 5;
+pub const SUB_EPOCH_GRID_SECS: u64 = 60;
 
-/// Build-time check: `EPOCH_SECS` is exactly 12 `SUB_EPOCH_GRID_SECS`
-/// units, in both builds. This is the "in proportion" guarantee the
-/// `demo-time` feature rests on - every other window in this module
-/// (and every contract's own window built as a multiple of either
-/// constant) comes out scaled by the identical factor as a result,
-/// never needing its own feature gate.
+/// Build-time check (normal build only): `EPOCH_SECS` is exactly 12
+/// `SUB_EPOCH_GRID_SECS` units - the "in proportion" guarantee every
+/// other window in this module (and every contract's own window built
+/// as a multiple of either constant) rests on. The demo-time build
+/// breaks this exact ratio on purpose (see this module's own doc
+/// comment on why `SUB_EPOCH_GRID_SECS` cannot stay at 60x there) and
+/// checks only that `EPOCH_SECS` is a whole multiple of
+/// `SUB_EPOCH_GRID_SECS` instead - still everything
+/// `SUB_EPOCH_SECS_ALLOWED`-style per-hour arithmetic
+/// (`EPOCH_SECS / SUB_EPOCH_GRID_SECS` sub-epochs per hour) needs,
+/// just not tied to the number 12 specifically.
+#[cfg(not(feature = "demo-time"))]
 const _: () = assert!(EPOCH_SECS == 12 * SUB_EPOCH_GRID_SECS);
+#[cfg(feature = "demo-time")]
+const _: () = assert!(EPOCH_SECS.is_multiple_of(SUB_EPOCH_GRID_SECS));
 
 /// `sylox_types::assets::RingSlot`'s own packed width in `risk-oracle`
 /// and `Sub(asset)`'s own packed slot width (same encoding, Section
@@ -228,3 +256,23 @@ pub const MAX_UNBUILT_HOURS_SCANNED_BY_COVER_GATE: u32 = 73;
 /// guard against a regression here.
 const _: () =
     assert!(MAX_UNBUILT_HOURS_SCANNED_BY_COVER_GATE as u64 == MAX_DEPEG_WINDOW_EPOCHS + 1);
+
+/// The normal build's own `EPOCH_SECS`/`SUB_EPOCH_GRID_SECS` stay at
+/// their real, technical-doc.md values and in the strict 12x ratio
+/// the build-time assertion above checks - only the demo-time build
+/// breaks that ratio (see this module's own doc comment on why
+/// `SUB_EPOCH_GRID_SECS` cannot follow `EPOCH_SECS`'s scale there). A
+/// `const` assertion already enforces the ratio in both builds, but
+/// this test guards the actual real-world NUMBERS the normal build
+/// ships with, which nothing else here checks and a ratio-preserving
+/// change to both at once would not catch.
+#[cfg(all(test, not(feature = "demo-time")))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn normal_build_keeps_its_own_real_epoch_and_sub_epoch_seconds() {
+        assert_eq!(EPOCH_SECS, 3_600);
+        assert_eq!(SUB_EPOCH_GRID_SECS, 300);
+    }
+}
