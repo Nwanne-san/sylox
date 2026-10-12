@@ -26,4 +26,5 @@ export const bigShoulders = Big_Shoulders({
   weight: ["700", "800", "900"],
   variable: "--font-display-family",
   display: "swap",
+  adjustFontFallback: false,
 });
