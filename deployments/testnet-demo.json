@@ -28,12 +28,13 @@
     "note": "The one asset this deployment tracks: real AUTH_REVOCABLE and CLAWBACK_ENABLED issuer flags, for deploy/demo/scenario.sh's own real IssuerFreeze trigger. Never real money."
   },
   "series": {
-    "contract_id": "CB4NN3M2ETTGKWPW6F2HETTFOOLHVSFN7VMW7WCSCOTNV46RG4WVEDAM",
+    "contract_id": "CC227DMOJOYNBFQRZKEXHYUSZVQHERUTMPR6UEBGUYYJSZQHNBOADPHU",
     "asset": "CCEQHHZES5IE4QVNNIXMELOOFWQXWZA2QFLIPK5NFFU5V3PUVDHU52C5",
     "settlement": "CC5SO3C6JZ2GXHV3FAOTLBXQM5DUJBVXEOKSB3YFB6244SFKL64FN5RN",
-    "start": 1791768417,
-    "expiry": 1791772017,
-    "claim_window_secs": 600
+    "start": 1791769673,
+    "expiry": 1791799913,
+    "claim_window_secs": 600,
+    "note": "series_id 1, the second series opened on this deployment: series_id 0 (CB4NN3M2...) was opened by deploy.sh before the DEMO_EXPIRY fix and is permanently closed for selling (sale_end landed before start); harmless leftover, never used by scenario.sh."
   },
   "seed_epoch": 29862695,
   "identities": {
