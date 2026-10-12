@@ -187,16 +187,32 @@ post_history_signal() {
   local inputs_hash
   inputs_hash="$(printf 'scenario-history-%s' "$epoch" | sha256sum | cut -d' ' -f1)"
   local signal_set="{\"epoch\":$epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"10000000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
-  local out
-  out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
-    -- post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)" || true
-  if echo "$out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
-    return 0
-  fi
-  if echo "$out" | grep -qi "error"; then
+  local out attempt
+  # Same transient footprint/finality race deploy.sh testnet-demo's own
+  # post_seed_signal already documents: post_signals' finality scan can
+  # cross Pending into Final between simulate and submit at this
+  # feature's compressed epoch length, trapping on a Signals(asset,
+  # epoch) key the simulated footprint never declared. A fresh
+  # re-simulate moments later resolves it.
+  for attempt in 1 2 3 4 5; do
+    out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
+      -- post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)" || true
+    if echo "$out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
+      return 0
+    fi
+    if ! echo "$out" | grep -qi "error"; then
+      return 0
+    fi
+    if echo "$out" | grep -qi "exceeded_limit\|outside of the footprint"; then
+      log "post_signals (epoch $epoch): transient footprint/finality race (attempt $attempt/5), retrying"
+      sleep 2
+      continue
+    fi
     die "post_signals (epoch $epoch) failed:
 $out"
-  fi
+  done
+  die "post_signals (epoch $epoch) failed after 5 attempts, still hitting the transient footprint race:
+$out"
 }
 
 log "[3/9] Building RiskOracle's real 168-epoch history for DMFRZ (this is the slow step; see this script's own header comment)"
