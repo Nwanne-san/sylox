@@ -21,7 +21,9 @@ mod storage;
 use soroban_sdk::{
     contract, contractimpl, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol, Vec,
 };
-use sylox_types::{AssetConfig, Band, EndpointStatus, RingSlot, RiskScore, SignalSet, SCALE};
+use sylox_types::{
+    AssetConfig, Band, EndpointStatus, HistoryStatus, RingSlot, RiskScore, SignalSet, SCALE,
+};
 
 use clients::{FxAdapterClient, GovernorClient, PriceAdapterClient, StakingClient};
 pub use error::Error;
@@ -1473,6 +1475,50 @@ impl RiskOracle {
 
     pub fn band(env: Env, asset: Address) -> Result<Band, Error> {
         Ok(Self::score(env, asset)?.band)
+    }
+
+    /// Read-only, no auth. Reports how much history an asset has and
+    /// whether it satisfies all conditions for score computation.
+    /// Shares the history gate with scoring so the two never drift.
+    pub fn history_status(env: Env, asset: Address) -> Result<HistoryStatus, Error> {
+        storage::get_asset_config(&env, &asset).ok_or(Error::UnknownAsset)?;
+
+        let first_epoch = storage::get_first_epoch(&env, &asset);
+        let newest_epoch = storage::get_newest_epoch_pub(&env, &asset);
+        let newest_final = storage::get_newest_final(&env, &asset);
+
+        match (first_epoch, newest_final) {
+            (Some(first), Some(final_ep)) => {
+                let (gate, _) = score::history_gate(&env, &asset, final_ep, first);
+                let newest_final_stale = is_stale_epoch(&env, final_ep);
+                let score_ready = gate.passes && !newest_final_stale;
+
+                Ok(HistoryStatus {
+                    first_epoch,
+                    newest_epoch,
+                    newest_final,
+                    span_epochs: gate.span_epochs,
+                    epochs_until_span_ready: gate.epochs_until_span_ready,
+                    present_epochs_7d: gate.present_epochs_7d,
+                    min_present_epochs_7d: score::MIN_FINAL_EPOCHS_7D,
+                    newest_slot_present: gate.newest_slot_present,
+                    newest_final_stale,
+                    score_ready,
+                })
+            }
+            _ => Ok(HistoryStatus {
+                first_epoch,
+                newest_epoch,
+                newest_final,
+                span_epochs: 0,
+                epochs_until_span_ready: AGGREGATE_SLOTS_7D as u64,
+                present_epochs_7d: 0,
+                min_present_epochs_7d: score::MIN_FINAL_EPOCHS_7D,
+                newest_slot_present: false,
+                newest_final_stale: true,
+                score_ready: false,
+            }),
+        }
     }
 
     /// Re-review item C7 (lead decision): `asset_stale` now means "the

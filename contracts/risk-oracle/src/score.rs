@@ -210,6 +210,58 @@ pub struct Aggregates {
     pub supply_change_24h_bps: i128,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GateResult {
+    pub span_epochs: u64,
+    pub epochs_until_span_ready: u64,
+    pub present_epochs_7d: u32,
+    pub newest_slot_present: bool,
+    pub passes: bool,
+}
+
+pub fn history_gate(
+    env: &Env,
+    asset: &Address,
+    newest_final: u64,
+    first_epoch: u64,
+) -> (GateResult, Vec<Option<sylox_types::RingSlot>>) {
+    let span_epochs = newest_final.saturating_add(1).saturating_sub(first_epoch);
+    let target_span = AGGREGATE_SLOTS_7D as u64;
+    let epochs_until_span_ready = target_span.saturating_sub(span_epochs);
+
+    if span_epochs < target_span {
+        return (
+            GateResult {
+                span_epochs,
+                epochs_until_span_ready,
+                present_epochs_7d: 0,
+                newest_slot_present: false,
+                passes: false,
+            },
+            Vec::new(env),
+        );
+    }
+
+    let start = newest_final.saturating_add(1).saturating_sub(target_span);
+    let window = storage::get_window(env, asset, start, AGGREGATE_SLOTS_7D);
+
+    let present_epochs_7d = window.iter().filter(|slot| slot.is_some()).count() as u32;
+    let newest_slot_present = window.get(AGGREGATE_SLOTS_7D - 1).flatten().is_some();
+
+    let passes = present_epochs_7d >= MIN_FINAL_EPOCHS_7D && newest_slot_present;
+
+    (
+        GateResult {
+            span_epochs,
+            epochs_until_span_ready,
+            present_epochs_7d,
+            newest_slot_present,
+            passes,
+        },
+        window,
+    )
+}
+
 /// Reads the newest `AGGREGATE_SLOTS_7D` ring slots ending at `latest_epoch`
 /// and folds them into the aggregates every score component needs.
 /// `latest_epoch` must be a Final epoch (the caller's responsibility; this
@@ -238,19 +290,8 @@ pub fn aggregate_from_ring(
     latest_epoch: u64,
     first_epoch: u64,
 ) -> Result<Aggregates, Error> {
-    if latest_epoch + 1 < first_epoch + AGGREGATE_SLOTS_7D as u64 {
-        // Not enough history yet for a 7 day baseline; treat as stale
-        // rather than scoring on a partial window silently.
-        return Err(Error::AggregationFailed);
-    }
-    let start = latest_epoch + 1 - AGGREGATE_SLOTS_7D as u64;
-    let window = storage::get_window(env, asset, start, AGGREGATE_SLOTS_7D);
-
-    // PR #27 review (round 2): see `MIN_FINAL_EPOCHS_7D`'s own doc
-    // comment. `first_epoch`-based calendar time alone does not
-    // guarantee this window is populated; count it directly.
-    let final_slots = window.iter().filter(|slot| slot.is_some()).count() as u32;
-    if final_slots < MIN_FINAL_EPOCHS_7D {
+    let (gate, window) = history_gate(env, asset, latest_epoch, first_epoch);
+    if !gate.passes {
         return Err(Error::AggregationFailed);
     }
 

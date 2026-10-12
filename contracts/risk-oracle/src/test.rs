@@ -3487,3 +3487,336 @@ fn register_at_can_replace_config_but_only_as_a_testutils_convenience() {
         )]
     );
 }
+
+// -- history_status tests (Issue #58) --
+
+#[test]
+fn history_status_unknown_asset_returns_error() {
+    let env = Env::default();
+    let fx = setup(&env);
+    let asset = Address::generate(&env);
+
+    let res = fx.client.try_history_status(&asset);
+    assert_eq!(res, Err(Ok(Error::UnknownAsset)));
+}
+
+#[test]
+fn history_status_registered_never_posted() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+
+    let status = fx.client.history_status(&asset);
+    assert_eq!(status.first_epoch, None);
+    assert_eq!(status.newest_epoch, None);
+    assert_eq!(status.newest_final, None);
+    assert_eq!(status.span_epochs, 0);
+    assert_eq!(status.epochs_until_span_ready, 168);
+    assert_eq!(status.present_epochs_7d, 0);
+    assert_eq!(status.min_present_epochs_7d, 96);
+    assert!(!status.newest_slot_present);
+    assert!(status.newest_final_stale);
+    assert!(!status.score_ready);
+}
+
+#[test]
+fn history_status_one_posted_epoch_pending() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+    let epoch = 100u64;
+
+    post(&env, &fx.client, &asset, epoch, 10_000_000);
+
+    let status = fx.client.history_status(&asset);
+    assert_eq!(status.first_epoch, Some(epoch));
+    assert_eq!(status.newest_epoch, Some(epoch));
+    assert_eq!(status.newest_final, None);
+    assert_eq!(status.span_epochs, 0);
+    assert_eq!(status.epochs_until_span_ready, 168);
+    assert_eq!(status.present_epochs_7d, 0);
+    assert_eq!(status.min_present_epochs_7d, 96);
+    assert!(!status.newest_slot_present);
+    assert!(status.newest_final_stale);
+    assert!(!status.score_ready);
+}
+
+#[test]
+fn history_status_167_final_epochs_in_a_row() {
+    const BASE: u64 = 400_000;
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+
+    // 167 final epochs: epochs BASE..BASE+167.
+    // To make BASE+166 final, we post BASE..BASE+168 (169 posts).
+    // newest_final will be BASE+166 (167 epochs: BASE to BASE+166).
+    let keeper = Address::generate(&env);
+    let staking_client = crate::mocks::MockStakingClient::new(&env, &fx.staking);
+    for i in 0..169u64 {
+        let ep = BASE + i;
+        staking_client.set_aggregate(&asset, &ep, &EndpointStatus::Up);
+        env.ledger().set_timestamp(time_at_epoch(ep));
+        let mut s = signal_set(&env, ep, 10_000_000);
+        s.liquidity_2pct = 500_000_000_000;
+        s.supply_change_bps = 0;
+        fx.client.post_signals(&keeper, &asset, &s);
+    }
+
+    let status = fx.client.history_status(&asset);
+    assert_eq!(status.first_epoch, Some(BASE));
+    assert_eq!(status.newest_epoch, Some(BASE + 168));
+    assert_eq!(status.newest_final, Some(BASE + 166));
+    assert_eq!(status.span_epochs, 167);
+    assert_eq!(status.epochs_until_span_ready, 1);
+    assert!(!status.score_ready);
+
+    // Agreement check (test 10): score() must be stale with nothing scored at newest_final
+    let score = fx.client.score(&asset);
+    assert!(score.stale);
+    assert_ne!(score.epoch, BASE + 166);
+}
+
+#[test]
+fn history_status_168_final_epochs_in_a_row_ready() {
+    const BASE: u64 = 400_000;
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+
+    // 168 final epochs: epochs BASE..BASE+168.
+    // Posting BASE..BASE+169 (170 posts) leaves BASE+167 as newest_final.
+    let keeper = Address::generate(&env);
+    let staking_client = crate::mocks::MockStakingClient::new(&env, &fx.staking);
+    for i in 0..170u64 {
+        let ep = BASE + i;
+        staking_client.set_aggregate(&asset, &ep, &EndpointStatus::Up);
+        env.ledger().set_timestamp(time_at_epoch(ep));
+        let mut s = signal_set(&env, ep, 10_000_000);
+        s.liquidity_2pct = 500_000_000_000;
+        s.supply_change_bps = 0;
+        fx.client.post_signals(&keeper, &asset, &s);
+    }
+
+    let status = fx.client.history_status(&asset);
+    assert_eq!(status.first_epoch, Some(BASE));
+    assert_eq!(status.newest_epoch, Some(BASE + 169));
+    assert_eq!(status.newest_final, Some(BASE + 167));
+    assert_eq!(status.span_epochs, 168);
+    assert_eq!(status.epochs_until_span_ready, 0);
+    assert_eq!(status.present_epochs_7d, 168);
+    assert_eq!(status.min_present_epochs_7d, 96);
+    assert!(status.newest_slot_present);
+    assert!(!status.newest_final_stale);
+    assert!(status.score_ready);
+
+    // Agreement check (test 10): score() has fresh, non-stale score at newest_final
+    let score = fx.client.score(&asset);
+    assert!(!score.stale);
+    assert_eq!(score.epoch, BASE + 167);
+}
+
+#[test]
+fn history_status_168_span_with_95_present_gaps() {
+    const BASE: u64 = 400_000;
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+
+    // Asset first posted at BASE.
+    let keeper = Address::generate(&env);
+    let staking_client = crate::mocks::MockStakingClient::new(&env, &fx.staking);
+    staking_client.set_aggregate(&asset, &BASE, &EndpointStatus::Up);
+    env.ledger().set_timestamp(time_at_epoch(BASE));
+    let mut s = signal_set(&env, BASE, 10_000_000);
+    s.liquidity_2pct = 500_000_000_000;
+    s.supply_change_bps = 0;
+    fx.client.post_signals(&keeper, &asset, &s);
+
+    // We want newest_final to be BASE + 167 (span = 168).
+    // The window is [BASE, BASE+167].
+    // We want exactly 95 present slots in that window.
+    // BASE is already posted and will be final.
+    // Post 94 more epochs inside the window: from BASE + 74 to BASE + 167.
+    // Number of epochs in [74, 167] is 167 - 74 + 1 = 94.
+    // Total present in window = 1 + 94 = 95.
+    for i in 74..=167u64 {
+        let ep = BASE + i;
+        staking_client.set_aggregate(&asset, &ep, &EndpointStatus::Up);
+        env.ledger().set_timestamp(time_at_epoch(ep));
+        let mut s = signal_set(&env, ep, 10_000_000);
+        s.liquidity_2pct = 500_000_000_000;
+        s.supply_change_bps = 0;
+        fx.client.post_signals(&keeper, &asset, &s);
+    }
+
+    // Now finalize up to BASE + 167 by advancing clock and finalizing endpoint
+    let target_final = BASE + 167;
+    env.ledger()
+        .set_timestamp(time_at_epoch(target_final) + crate::SIGNAL_DISPUTE_SECS + 1);
+    fx.client.finalize_endpoint(&asset, &target_final);
+
+    let status = fx.client.history_status(&asset);
+    assert_eq!(status.span_epochs, 168);
+    assert_eq!(status.epochs_until_span_ready, 0);
+    assert_eq!(status.present_epochs_7d, 95);
+    assert!(status.newest_slot_present);
+    assert!(!status.score_ready);
+
+    // Agreement check (test 10)
+    let score = fx.client.score(&asset);
+    assert!(score.stale);
+    assert_ne!(score.epoch, target_final);
+}
+
+#[test]
+fn history_status_exactly_96_present_with_newest_slot_present() {
+    const BASE: u64 = 400_000;
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+
+    let keeper = Address::generate(&env);
+    let staking_client = crate::mocks::MockStakingClient::new(&env, &fx.staking);
+    staking_client.set_aggregate(&asset, &BASE, &EndpointStatus::Up);
+    env.ledger().set_timestamp(time_at_epoch(BASE));
+    let mut s = signal_set(&env, BASE, 10_000_000);
+    s.liquidity_2pct = 500_000_000_000;
+    s.supply_change_bps = 0;
+    fx.client.post_signals(&keeper, &asset, &s);
+
+    // BASE is 1. Post 95 more in [73, 167]: count = 167 - 73 + 1 = 95.
+    // Total present in window = 1 + 95 = 96.
+    for i in 73..=167u64 {
+        let ep = BASE + i;
+        staking_client.set_aggregate(&asset, &ep, &EndpointStatus::Up);
+        env.ledger().set_timestamp(time_at_epoch(ep));
+        let mut s = signal_set(&env, ep, 10_000_000);
+        s.liquidity_2pct = 500_000_000_000;
+        s.supply_change_bps = 0;
+        fx.client.post_signals(&keeper, &asset, &s);
+    }
+
+    let target_final = BASE + 167;
+    env.ledger()
+        .set_timestamp(time_at_epoch(target_final) + crate::SIGNAL_DISPUTE_SECS + 1);
+    fx.client.finalize_endpoint(&asset, &target_final);
+
+    let status = fx.client.history_status(&asset);
+    assert_eq!(status.span_epochs, 168);
+    assert_eq!(status.epochs_until_span_ready, 0);
+    assert_eq!(status.present_epochs_7d, 96);
+    assert!(status.newest_slot_present);
+    assert!(!status.newest_final_stale);
+    assert!(status.score_ready);
+
+    // Agreement check (test 10)
+    let score = fx.client.score(&asset);
+    assert!(!score.stale);
+    assert_eq!(score.epoch, target_final);
+}
+
+#[test]
+fn history_status_enough_history_but_newest_slot_missing_due_to_overturn() {
+    const BASE: u64 = 400_000;
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let staking = env.register(MockStaking, ());
+    let governor = env.register(MockGovernor, ());
+    let registry = Address::generate(&env);
+    let contract_id = env.register(
+        RiskOracle,
+        (governor.clone(), registry.clone(), staking.clone()),
+    );
+    let client = RiskOracleClient::new(&env, &contract_id);
+
+    let governor_client = crate::mocks::MockGovernorClient::new(&env, &governor);
+    let committee = Address::generate(&env);
+    governor_client.set_committee(&committee);
+
+    let asset = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    client.add_asset(&asset_config(&env, &asset, &issuer));
+
+    let keeper = Address::generate(&env);
+    let staking_client = crate::mocks::MockStakingClient::new(&env, &staking);
+
+    // Post 168 epochs: BASE..=BASE+167
+    for i in 0..168u64 {
+        let ep = BASE + i;
+        staking_client.set_aggregate(&asset, &ep, &EndpointStatus::Up);
+        env.ledger().set_timestamp(time_at_epoch(ep));
+        let mut s = signal_set(&env, ep, 10_000_000);
+        s.liquidity_2pct = 500_000_000_000;
+        s.supply_change_bps = 0;
+        client.post_signals(&keeper, &asset, &s);
+    }
+
+    // Now dispute the newest epoch (BASE + 167)
+    let newest_ep = BASE + 167;
+    let disputer = Address::generate(&env);
+    client.dispute_signals(
+        &disputer,
+        &asset,
+        &newest_ep,
+        &BytesN::from_array(&env, &[9u8; 32]),
+    );
+
+    // Overturn the dispute: keeper_wins = false
+    client.resolve_signal_dispute(
+        &asset,
+        &newest_ep,
+        &false,
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+
+    // Finalize older epochs up to BASE + 166
+    let target_final = BASE + 166;
+    env.ledger()
+        .set_timestamp(time_at_epoch(target_final) + crate::SIGNAL_DISPUTE_SECS + 1);
+    client.finalize_endpoint(&asset, &target_final);
+
+    let status = client.history_status(&asset);
+    // newest_epoch is BASE + 167 (still tracked in RingNewest)
+    assert_eq!(status.newest_epoch, Some(newest_ep));
+    // newest_final is BASE + 166
+    assert_eq!(status.newest_final, Some(target_final));
+    assert_eq!(status.span_epochs, 167);
+    assert_eq!(status.epochs_until_span_ready, 1);
+    assert!(!status.score_ready);
+
+    // Agreement check (test 10)
+    let score = client.score(&asset);
+    assert!(score.stale);
+    assert_ne!(score.epoch, newest_ep);
+}
+
+#[test]
+fn history_status_enough_history_then_clock_stale() {
+    const BASE: u64 = 400_000;
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+
+    let keeper = Address::generate(&env);
+    let staking_client = crate::mocks::MockStakingClient::new(&env, &fx.staking);
+    for i in 0..170u64 {
+        let ep = BASE + i;
+        staking_client.set_aggregate(&asset, &ep, &EndpointStatus::Up);
+        env.ledger().set_timestamp(time_at_epoch(ep));
+        let mut s = signal_set(&env, ep, 10_000_000);
+        s.liquidity_2pct = 500_000_000_000;
+        s.supply_change_bps = 0;
+        fx.client.post_signals(&keeper, &asset, &s);
+    }
+
+    let newest_final = BASE + 167;
+    // Advance clock past staleness threshold (STALE_AFTER_EPOCHS = 3)
+    let stale_time = first_stale_time(newest_final);
+    env.ledger().set_timestamp(stale_time);
+
+    let status = fx.client.history_status(&asset);
+    assert_eq!(status.span_epochs, 168);
+    assert_eq!(status.present_epochs_7d, 168);
+    assert!(status.newest_slot_present);
+    assert!(status.newest_final_stale);
+    assert!(!status.score_ready);
+
+    // Agreement check (test 10)
+    let score = fx.client.score(&asset);
+    assert!(score.stale);
+}
