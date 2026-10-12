@@ -430,7 +430,12 @@ $deploy_out"
     for attempt in 1 2 3 4; do
       if post_out="$(invoke_demo "$RO_ID" "$DEMO_KEEPER" post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)"; then
         return 0
-      elif echo "$post_out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
+      elif echo "$post_out" | grep -qi "Error(Contract, #103)\|Error(Contract, #115)\|EpochAlreadyPosted\|HourAlreadyPosted"; then
+        # #103 (EpochAlreadyPosted) and #115 (HourAlreadyPosted, this
+        # hour already posted via the sub-epoch path instead) both
+        # mean this hour already has real data - post-demo-signals.sh's
+        # own is_already_posted_error already matches both for the
+        # same reason.
         return 0
       elif echo "$post_out" | grep -qi "exceeded_limit\|outside of the footprint"; then
         log "post_signals (epoch $epoch): finality backlog cascade (attempt $attempt/4), waiting $(( 2 * EPOCH_SECS ))s for it to settle"

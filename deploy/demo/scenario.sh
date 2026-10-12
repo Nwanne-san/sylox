@@ -241,7 +241,12 @@ post_signals_with_retry() {
     if ! echo "$out" | grep -qi "error"; then
       echo "$out"; return 0
     fi
-    if echo "$out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
+    if echo "$out" | grep -qi "Error(Contract, #103)\|Error(Contract, #115)\|EpochAlreadyPosted\|HourAlreadyPosted"; then
+      # #103 (EpochAlreadyPosted) and #115 (HourAlreadyPosted, this
+      # hour already posted via the sub-epoch path instead) both mean
+      # this hour already has real data - post-demo-signals.sh's own
+      # is_already_posted_error already matches both for the same
+      # reason.
       echo "$out"; return 0
     fi
     if echo "$out" | grep -qi "exceeded_limit\|outside of the footprint"; then
