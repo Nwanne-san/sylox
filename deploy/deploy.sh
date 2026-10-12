@@ -288,7 +288,7 @@ $deploy_out"
   log "minted $DEMO_KEEPER_BOND DMUSD to the demo keeper"
 
   log "[5/8] Precomputing contract addresses (constructor flow, deploy.sh testnet's own technique)"
-  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v4"
+  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v5"
   salt_for_demo() {
     local contract="$1"
     echo -n "${CONSTRUCTOR_NONCE_DEMO}-${contract}" | shasum -a 256 | cut -d' ' -f1
@@ -409,35 +409,38 @@ $deploy_out"
     inputs_hash="$(printf 'deploy-demo-seed-%s' "$epoch" | sha256sum | cut -d' ' -f1)"
     local signal_set="{\"epoch\":$epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"$LIQUIDITY\",\"redemption_net\":\"0\",\"supply\":\"$SUPPLY\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
     local post_out attempt
-    # post_signals' own finality scan (try_advance_finality) crosses a
-    # signal from Pending to Final purely by wall-clock time
-    # (signal_dispute_secs after posting), and the CLI's footprint is
-    # fixed at simulate time, moments before real submission. At this
-    # feature's compressed epoch length the two can straddle that
-    # Pending-to-Final instant often enough to matter: simulating
-    # finds no newly-Final epoch to reward, submission lands just
-    # after one crosses, and reward_posters_for_newly_final_epochs
-    # then reads a Signals(asset, epoch) entry the simulated footprint
-    # never declared, trapping the whole call with a footprint
-    # "exceeded_limit" error. A fresh re-simulate a few seconds later
-    # computes a footprint against the ledger state at THAT moment,
-    # so a retry resolves it; this never happens at the real EPOCH_SECS
-    # (3,600s), where this window is negligible next to normal CLI
-    # latency.
-    for attempt in 1 2 3 4 5; do
+    # This loop posts far faster than signal_dispute_secs (2 epochs),
+    # so a real backlog of Pending epochs builds up between flushes.
+    # post_signals' own finality scan (try_advance_finality) crosses
+    # the WHOLE backlog from Pending to Final at once, purely by
+    # wall-clock time, the moment the oldest of them clears
+    # signal_dispute_secs - but the CLI's footprint is fixed at
+    # simulate time, a little before real submission. Landing on
+    # either side of that one cascade instant changes how many
+    # epochs reward_posters_for_newly_final_epochs needs to read: too
+    # few declared in the footprint traps the whole call with a
+    # footprint "exceeded_limit" error. A short retry almost always
+    # lands on the SAME side of the same cascade again, so the sleep
+    # here is a full signal_dispute_secs (2 * EPOCH_SECS), long enough
+    # that the backlog is unambiguously, fully settled by the next
+    # attempt - confirmed empirically: a manual retry ~100s after one
+    # of these flushed a 12 epoch backlog in one call. Negligible at
+    # the real EPOCH_SECS (3,600s), where backfill posts once per
+    # epoch, never racing far enough ahead to build a backlog at all.
+    for attempt in 1 2 3; do
       if post_out="$(invoke_demo "$RO_ID" "$DEMO_KEEPER" post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)"; then
         return 0
       elif echo "$post_out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
         return 0
       elif echo "$post_out" | grep -qi "exceeded_limit\|outside of the footprint"; then
-        log "post_signals (epoch $epoch): transient footprint/finality race (attempt $attempt/5), retrying"
-        sleep 2
+        log "post_signals (epoch $epoch): finality backlog cascade (attempt $attempt/3), waiting $(( 2 * EPOCH_SECS ))s for it to settle"
+        sleep "$(( 2 * EPOCH_SECS ))"
       else
         die "post_signals (epoch $epoch) failed:
 $post_out"
       fi
     done
-    die "post_signals (epoch $epoch) failed after 5 attempts, still hitting the transient footprint race:
+    die "post_signals (epoch $epoch) failed after 3 attempts, still hitting the finality backlog cascade:
 $post_out"
   }
   # A converging catch-up loop, not a fixed range: posting itself
