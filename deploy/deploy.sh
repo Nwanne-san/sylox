@@ -477,6 +477,11 @@ $post_out"
   DEMO_CLAIM_WINDOW=600
   DEMO_TERMS="{\"asset\":\"$DMFRZ_ID\",\"def_versions\":{\"IssuerFreeze\":1},\"settlement\":\"$DMUSD_ID\",\"start\":$DEMO_START,\"expiry\":$DEMO_EXPIRY,\"claim_window_secs\":$DEMO_CLAIM_WINDOW,\"cap\":\"1000000000000000\",\"max_cover_per_buyer\":\"1000000000000000\",\"require_holding\":false,\"fee_bps\":750}"
   SERIES_ID="$("$STELLAR_BIN" contract invoke --id "$MF_ID" --source-account "$DEMO_ADMIN" --network testnet -- open_series --terms "$DEMO_TERMS" | tail -1)"
+  # This CLI version prints an Address-typed return value JSON-quoted
+  # ("C...") rather than bare, unlike the precomputed addresses
+  # elsewhere in this script (from `contract id wasm`, never quoted).
+  SERIES_ID="${SERIES_ID%\"}"
+  SERIES_ID="${SERIES_ID#\"}"
   [[ "$SERIES_ID" =~ ^C[A-Z0-9]{55}$ ]] || die "open_series did not return a contract address: $SERIES_ID"
   log "MarketFactory.open_series: Series deployed at $SERIES_ID (expiry in $(( DEMO_EXPIRY - DEMO_START))s, claim_window_secs=$DEMO_CLAIM_WINDOW)"
 
