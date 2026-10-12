@@ -199,7 +199,7 @@ post_history_signal() {
   # always lands on the same side again. The sleep here is a full
   # signal_dispute_secs (2 * EPOCH_SECS) so the backlog is
   # unambiguously settled by the next attempt.
-  for attempt in 1 2 3; do
+  for attempt in 1 2 3 4; do
     out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
       -- post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)" || true
     if echo "$out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
@@ -209,14 +209,22 @@ post_history_signal() {
       return 0
     fi
     if echo "$out" | grep -qi "exceeded_limit\|outside of the footprint"; then
-      log "post_signals (epoch $epoch): finality backlog cascade (attempt $attempt/3), waiting $(( 2 * EPOCH_SECS ))s for it to settle"
+      log "post_signals (epoch $epoch): finality backlog cascade (attempt $attempt/4), waiting $(( 2 * EPOCH_SECS ))s for it to settle"
       sleep "$(( 2 * EPOCH_SECS ))"
+      continue
+    fi
+    if echo "$out" | grep -qi "Request timeout\|transaction submission timeout\|error reading a body from connection\|client error (SendRequest)\|client error (Connect)\|txBadSeq"; then
+      # Same transient-vs-real distinction post-demo-signals.sh's own
+      # is_transient_error already documents: a network hiccup against
+      # the public testnet RPC, never a real rejection.
+      log "post_signals (epoch $epoch): transient RPC error (attempt $attempt/4), retrying"
+      sleep 3
       continue
     fi
     die "post_signals (epoch $epoch) failed:
 $out"
   done
-  die "post_signals (epoch $epoch) failed after 3 attempts, still hitting the finality backlog cascade:
+  die "post_signals (epoch $epoch) failed after 4 attempts:
 $out"
 }
 

@@ -288,7 +288,7 @@ $deploy_out"
   log "minted $DEMO_KEEPER_BOND DMUSD to the demo keeper"
 
   log "[5/8] Precomputing contract addresses (constructor flow, deploy.sh testnet's own technique)"
-  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v5"
+  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v6"
   salt_for_demo() {
     local contract="$1"
     echo -n "${CONSTRUCTOR_NONCE_DEMO}-${contract}" | shasum -a 256 | cut -d' ' -f1
@@ -427,20 +427,29 @@ $deploy_out"
     # of these flushed a 12 epoch backlog in one call. Negligible at
     # the real EPOCH_SECS (3,600s), where backfill posts once per
     # epoch, never racing far enough ahead to build a backlog at all.
-    for attempt in 1 2 3; do
+    for attempt in 1 2 3 4; do
       if post_out="$(invoke_demo "$RO_ID" "$DEMO_KEEPER" post_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --s "$signal_set" 2>&1)"; then
         return 0
       elif echo "$post_out" | grep -qi "Error(Contract, #103)\|EpochAlreadyPosted"; then
         return 0
       elif echo "$post_out" | grep -qi "exceeded_limit\|outside of the footprint"; then
-        log "post_signals (epoch $epoch): finality backlog cascade (attempt $attempt/3), waiting $(( 2 * EPOCH_SECS ))s for it to settle"
+        log "post_signals (epoch $epoch): finality backlog cascade (attempt $attempt/4), waiting $(( 2 * EPOCH_SECS ))s for it to settle"
         sleep "$(( 2 * EPOCH_SECS ))"
+      elif echo "$post_out" | grep -qi "Request timeout\|transaction submission timeout\|error reading a body from connection\|client error (SendRequest)\|client error (Connect)\|txBadSeq"; then
+        # The same transient-vs-real distinction post-demo-signals.sh's
+        # own is_transient_error already documents: a Request timeout
+        # (seen this session, during simulate itself on a long-running
+        # deploy against the public testnet RPC) is a network hiccup,
+        # never a real rejection, worth a short retry rather than
+        # aborting the whole deployment over one flaky round trip.
+        log "post_signals (epoch $epoch): transient RPC error (attempt $attempt/4), retrying"
+        sleep 3
       else
         die "post_signals (epoch $epoch) failed:
 $post_out"
       fi
     done
-    die "post_signals (epoch $epoch) failed after 3 attempts, still hitting the finality backlog cascade:
+    die "post_signals (epoch $epoch) failed after 4 attempts:
 $post_out"
   }
   # A converging catch-up loop, not a fixed range: posting itself
