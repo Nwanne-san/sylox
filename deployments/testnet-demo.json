@@ -2,17 +2,17 @@
   "network": "testnet-demo",
   "passphrase": "Test SDF Network ; September 2015",
   "rpc_url": "https://soroban-testnet.stellar.org",
-  "deployed_at": "2026-10-12T03:40:34Z",
-  "git_commit": "b8bfd7fd6cff31f4b5fa648bab0d5a151847abed",
+  "deployed_at": "2026-10-12T05:23:02Z",
+  "git_commit": "2e1f6dc486e5e197fec887561b899bf931569788",
   "stellar_cli_version": "28.1.0",
-  "constructor_nonce": "sylox-demo-time-v8",
+  "constructor_nonce": "sylox-demo-time-v9",
   "demo_time": { "epoch_secs": 60, "window_secs": 4320 },
   "contracts": {
-    "risk_oracle": { "id": "CCEVA2RV2USWSLY7HZY7BFBIZRTNQNFF6DXJ5GEP6OW6AZ3MLI7GT2XY", "wasm_hash": "e854b75fe660967a48d753e0115209053237affb97e80cb443649b6df166e1a3", "wasm_size": 88806, "salt": "99794b3d83894c44ef1a36a537817f92a965d7ec51424c7314f28c1933c39b48" },
-    "staking": { "id": "CBID2EIHDF5LKBQNLNJP57CJR6P24POGQCTRJ7GU62AJTIGY7TGMS5CP", "wasm_hash": "6f5013ddaca450c344c91669baf777df7d460f41083f745018484c3e4311649f", "wasm_size": 47388, "salt": "c9b75895ad34fafca9e36f170ab7c37b6934ee01eea4129e508036e14bc031d7" },
-    "treasury": { "id": "CAD3Z25UF2B7SLJHICWN2FRYSFU5U5IDW3KEFWU2MXF3ODZLE2DIM3LW", "wasm_hash": "7f654b400e88d41f8ea6e39cc07a642fd20142cc833eba2c6c9ba0a12cdb76d9", "wasm_size": 14017, "salt": "0026f9389aac62a66340cf300c9b37f578470de1dc513ce2398c467d80650be1" },
-    "event_registry": { "id": "CCPBYWVRIOO2E7ZETXCYRDMNHQN6FIITBJL63TDXUVSMAC3KCXZUEN7S", "wasm_hash": "d19d1c61f57673f0be439ca6cb0337fc559414c26b6516d69e40b986cbbdd670", "wasm_size": 48966, "salt": "f4bc4274f40c1e0d7f2a3b8d4ea6b808e5c904332a6343319153e4a6458d93ab" },
-    "market_factory": { "id": "CC2ME2VISKH65P5HHJDBWTA3CBI32ETCVAF6IHXK4Z4RH37YYGZIKXTE", "wasm_hash": "d5aba0faa5f2b267e18fd115aa002fc00eb56184cc41b289cd603cf581680057", "wasm_size": 22898, "salt": "1aba97d3039285fd59bad3cadc7deb3a9076dfc295261c4a35ddf66449ebf06d" }
+    "risk_oracle": { "id": "CCGRMKOLIOLLBXYXFJI4IAMZRMZPFXHH5UQ2YS42SSGRPQ655AMV5BV6", "wasm_hash": "e854b75fe660967a48d753e0115209053237affb97e80cb443649b6df166e1a3", "wasm_size": 88806, "salt": "2713e220d8e3d5e3ec0f94192249c71b45026115ba345d6bc54b6d062756c0a5" },
+    "staking": { "id": "CAADIAEFQQWMI76NLHUBQSQFPCXWMI72RMY6P5XTNLD6OHICCCKRWMPN", "wasm_hash": "6f5013ddaca450c344c91669baf777df7d460f41083f745018484c3e4311649f", "wasm_size": 47388, "salt": "ba2be825935c127db76247190768e45772deefdbf9e3d7bf273ddd6458d72d9e" },
+    "treasury": { "id": "CAJX3AAXIAXLBAK2JOYCS3CNJPMYPSR2YX6ARR42ZVH32VK7LOTFBO2K", "wasm_hash": "7f654b400e88d41f8ea6e39cc07a642fd20142cc833eba2c6c9ba0a12cdb76d9", "wasm_size": 14017, "salt": "21f74d48b76f4df2637bb76b0b3ae2e2368e0d7e32e0d733665ff63b15c492be" },
+    "event_registry": { "id": "CD6C7TRAMMJHP7LGUGTD3EO2PUFR2XWWIBIBZPOMDL2PYAGSTOYATGS2", "wasm_hash": "d19d1c61f57673f0be439ca6cb0337fc559414c26b6516d69e40b986cbbdd670", "wasm_size": 48966, "salt": "af79839575bb7d624daa0a2adbb471045af2c6cab38d5ef9b5374464d91eec60" },
+    "market_factory": { "id": "CCN5QPCX77EZC777JL3N5LHAWG4RTYYMNGEM3XYQCV76FVXORZNMSHVP", "wasm_hash": "d5aba0faa5f2b267e18fd115aa002fc00eb56184cc41b289cd603cf581680057", "wasm_size": 22898, "salt": "d53304ff1b56f71b1755a93464a1741855223d6563ea96f1c0f75448fc2aa770" }
   },
   "series_wasm_hash": "e2dcb37f55756f4a6f1bc1cc00f42e0883ea9854df2aa1d6c37a71cc9ff10a82",
   "dmusd": {
@@ -28,14 +28,14 @@
     "note": "The one asset this deployment tracks: real AUTH_REVOCABLE and CLAWBACK_ENABLED issuer flags, for deploy/demo/scenario.sh's own real IssuerFreeze trigger. Never real money."
   },
   "series": {
-    "contract_id": "CAP7XCFQPEVUOTS2BUWFIJGRLGKEEV2KQZLCAMFO3QOUVJLV2H34QZDF",
+    "contract_id": "CAENUZVAC5YJZHXVWK6RYAQFR6AFP53OVFY5PZKD5UY5VKYAIH4AHSFZ",
     "asset": "CCEQHHZES5IE4QVNNIXMELOOFWQXWZA2QFLIPK5NFFU5V3PUVDHU52C5",
     "settlement": "CC5SO3C6JZ2GXHV3FAOTLBXQM5DUJBVXEOKSB3YFB6244SFKL64FN5RN",
-    "start": 1791776424,
-    "expiry": 1791806664,
+    "start": 1791782574,
+    "expiry": 1791812814,
     "claim_window_secs": 600
   },
-  "seed_epoch": 29862829,
+  "seed_epoch": 29862935,
   "identities": {
     "deployer": "GA22EOO5PK3ITEP5RYPKXE6MJSBHJLKB2AYV2D5RTCKJSIISWRUDJL44",
     "admin": "GBLBFECZINS4PRHONSJLITC7HJJKHCT2H2ST2PBOHB2MLFDHTND5XJZG",
