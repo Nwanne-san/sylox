@@ -268,7 +268,7 @@ post_history_signal() {
   local epoch="$1"
   local inputs_hash
   inputs_hash="$(printf 'scenario-history-%s' "$epoch" | sha256sum | cut -d' ' -f1)"
-  local signal_set="{\"epoch\":$epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"10000000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
+  local signal_set="{\"epoch\":$epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"2000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
   local out
   if ! out="$(post_signals_with_retry "$signal_set" "epoch $epoch")"; then
     die "post_signals (epoch $epoch) failed after 4 attempts:
@@ -323,7 +323,7 @@ post_fresh_sub_epoch() {
   fi
   local inputs_hash
   inputs_hash="$(printf 'scenario-sub-%s-%s' "$hour" "$sub" | sha256sum | cut -d' ' -f1)"
-  local signal_set="{\"epoch\":$hour,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"10000000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
+  local signal_set="{\"epoch\":$hour,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"2000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
   local out attempt
   for attempt in 1 2 3; do
     out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
@@ -385,7 +385,7 @@ action_epoch=$(( $(date -u +%s) / EPOCH_SECS ))
 # action happened mid-epoch; post_signals only accepts a CLOSED one).
 sleep "$EPOCH_SECS"
 action_epoch=$(( $(date -u +%s) / EPOCH_SECS - 1 ))
-action_signal="{\"epoch\":$action_epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"10000000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":1,\"clawback_amount\":\"$REAL_CLAWBACK_AMOUNT\",\"auth_revocations\":1,\"flag_changes\":1},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$(printf '%s:%s' "$REVOKE_TX_HASH" "$CLAWBACK_TX_HASH" | sha256sum | cut -d' ' -f1)\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
+action_signal="{\"epoch\":$action_epoch,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"2000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":1,\"clawback_amount\":\"$REAL_CLAWBACK_AMOUNT\",\"auth_revocations\":1,\"flag_changes\":1},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$(printf '%s:%s' "$REVOKE_TX_HASH" "$CLAWBACK_TX_HASH" | sha256sum | cut -d' ' -f1)\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
 if ! out="$(post_signals_with_retry "$action_signal" "action epoch $action_epoch")"; then
   die "posting the real action signal failed:
 $out"

@@ -288,7 +288,7 @@ $deploy_out"
   log "minted $DEMO_KEEPER_BOND DMUSD to the demo keeper"
 
   log "[5/8] Precomputing contract addresses (constructor flow, deploy.sh testnet's own technique)"
-  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v8"
+  CONSTRUCTOR_NONCE_DEMO="sylox-demo-time-v9"
   salt_for_demo() {
     local contract="$1"
     echo -n "${CONSTRUCTOR_NONCE_DEMO}-${contract}" | shasum -a 256 | cut -d' ' -f1
@@ -401,7 +401,16 @@ $deploy_out"
   # covers the 72 epochs the backfill window itself allows for free,
   # real transaction time, not real epoch-boundary waiting.
   SEED_EPOCH=$(( $(date -u +%s) / EPOCH_SECS - WINDOW_SECS / EPOCH_SECS ))
-  SUPPLY="10000000000000"
+  # check_issuer_freeze's own freeze_pct_bps threshold (100, 1%) is
+  # clawback_sum * 10,000 / latest_supply - this reported SUPPLY must
+  # stay in proportion to the real DMFRZ amounts scenario.sh's own
+  # holder actually mints and has clawed back (100 DMFRZ minted, 50
+  # clawed), or no real clawback could ever reach 1% of it. A value
+  # this far out of proportion (the DMUSD-style "10000000000000"
+  # placeholder this used to be) makes propose_tier1 fail closed on
+  # every run, deterministically, found via a real scenario.sh run
+  # reaching Tier1CheckFailed with real clawback data already posted.
+  SUPPLY="2000000000"
   LIQUIDITY="500000000000"
   post_seed_signal() {
     local epoch="$1"
