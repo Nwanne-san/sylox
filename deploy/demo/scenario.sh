@@ -96,6 +96,7 @@ DEMO_KEEPER=sylox-demo-time-keeper
 # this cannot just be imported.
 EPOCH_SECS=60
 WINDOW_SECS=4320
+SUB_EPOCH_GRID_SECS=5
 
 TX_LINKS=()
 record_tx() {
@@ -137,6 +138,17 @@ invoke_read() {
 }
 tx_hash_from() { echo "$1" | grep -oE '[a-f0-9]{64}' | head -1; }
 return_value_from() { echo "$1" | tail -1; }
+# Every invoke_submit call that actually lands on chain has a real
+# transaction hash in its output; one that doesn't is a failure, not
+# a quiet success. A real one found the hard way: buy_cover failing
+# here once left the script running anyway, through real minting,
+# revoking and clawing back from a holder based on cover that was
+# never actually written.
+die_on_invoke_error() {
+  local out="$1" context="$2"
+  [[ -n "$(tx_hash_from "$out")" ]] || die "$context failed (no transaction hash in the result):
+$out"
+}
 
 ensure_identity() {
   local name="$1"
@@ -190,10 +202,12 @@ log "minted $SELLER_COLLATERAL DMUSD to the seller, $BUY_AMOUNT DMUSD to the buy
 
 log "[2/9] Seller deposits and quotes"
 out="$(invoke_submit "$SERIES_ID" "$SELLER" deposit --seller "$SELLER_ADDR" --amount "$SELLER_COLLATERAL")"
+die_on_invoke_error "$out" "deposit"
 record_tx "deposit ($SELLER_COLLATERAL DMUSD)" "$(tx_hash_from "$out")"
 
 RATE_BPS=500   # 5% annualized
 out="$(invoke_submit "$SERIES_ID" "$SELLER" quote --seller "$SELLER_ADDR" --rate_bps "$RATE_BPS" --available "$SELLER_COLLATERAL")"
+die_on_invoke_error "$out" "quote"
 record_tx "quote ($RATE_BPS bps)" "$(tx_hash_from "$out")"
 
 # Shared retry wrapper for any RiskOracle.post_signals call (both the
@@ -281,7 +295,51 @@ while true; do
 done
 
 log "[4/9] Buyer buys cover"
+# buy_cover's own check_feed_not_behind needs a sub-epoch posted
+# fresh (within feed_grace_secs), entirely separate from the hourly
+# history span above - the hourly backfill loop never touches the
+# CURRENT, still-open hour (it only ever posts now_epoch - 1), so
+# that hour's own sub-epochs are still free to post through here.
+post_fresh_sub_epoch() {
+  local now hour elapsed sub sub_epoch_secs=$SUB_EPOCH_GRID_SECS
+  now="$(date -u +%s)"
+  hour=$(( now / EPOCH_SECS ))
+  elapsed=$(( now - hour * EPOCH_SECS ))
+  sub=$(( elapsed / sub_epoch_secs - 1 ))
+  if (( sub < 0 )); then
+    # The current hour just started; its first sub-epoch hasn't
+    # closed yet. Wait for it rather than falling back to the
+    # previous hour, which the backfill loop has already claimed.
+    sleep "$sub_epoch_secs"
+    now="$(date -u +%s)"
+    hour=$(( now / EPOCH_SECS ))
+    elapsed=$(( now - hour * EPOCH_SECS ))
+    sub=$(( elapsed / sub_epoch_secs - 1 ))
+  fi
+  local inputs_hash
+  inputs_hash="$(printf 'scenario-sub-%s-%s' "$hour" "$sub" | sha256sum | cut -d' ' -f1)"
+  local signal_set="{\"epoch\":$hour,\"posted_at\":0,\"peg_ratio\":\"10000000\",\"peg_ratio_p10\":\"10000000\",\"liquidity_2pct\":\"500000000000\",\"redemption_net\":\"0\",\"supply\":\"10000000000000\",\"supply_change_bps\":0,\"issuer_actions\":{\"clawbacks\":0,\"clawback_amount\":\"0\",\"auth_revocations\":0,\"flag_changes\":0},\"endpoint\":\"Unknown\",\"inputs_hash\":\"$inputs_hash\",\"poster\":\"$DEMO_KEEPER_ADDR\"}"
+  local out attempt
+  for attempt in 1 2 3; do
+    out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account "$DEMO_KEEPER" --network testnet \
+      -- post_sub_signals --keeper "$DEMO_KEEPER_ADDR" --asset "$DMFRZ_ID" --hour "$hour" --sub "$sub" --s "$signal_set" 2>&1)"
+    if ! echo "$out" | grep -qi "error"; then return 0; fi
+    if echo "$out" | grep -qi "Request timeout\|transaction submission timeout\|error reading a body from connection\|client error (SendRequest)\|client error (Connect)\|txBadSeq"; then
+      log "post_sub_signals (hour $hour sub $sub): transient RPC error (attempt $attempt/3), retrying"
+      sleep 3
+      continue
+    fi
+    die "post_sub_signals (hour $hour sub $sub) failed:
+$out"
+  done
+  die "post_sub_signals (hour $hour sub $sub) failed after 3 attempts:
+$out"
+}
+post_fresh_sub_epoch
+log "posted a fresh sub-epoch feed"
+
 out="$(invoke_submit "$SERIES_ID" "$BUYER" buy_cover --buyer "$BUYER_ADDR" --amount "$BUY_AMOUNT" --max_rate_bps "$RATE_BPS")"
+die_on_invoke_error "$out" "buy_cover"
 record_tx "buy_cover ($BUY_AMOUNT DMFRZ cover)" "$(tx_hash_from "$out")"
 BUY_RESULT="$(return_value_from "$out")"
 log "buy_cover result: $BUY_RESULT"
@@ -330,6 +388,7 @@ fi
 record_tx "action signal posted (epoch $action_epoch)" "$(tx_hash_from "$out")"
 
 out="$(invoke_submit "$ER_ID" "$DEMO_ADMIN" propose_tier1 --caller "$DEMO_ADMIN_ADDR" --asset "$DMFRZ_ID" --kind '"IssuerFreeze"' --version 1)"
+die_on_invoke_error "$out" "propose_tier1"
 EVENT_ID="$(return_value_from "$out")"
 record_tx "propose_tier1 (event $EVENT_ID)" "$(tx_hash_from "$out")"
 log "IssuerFreeze event $EVENT_ID proposed for DMFRZ"
@@ -337,6 +396,7 @@ log "IssuerFreeze event $EVENT_ID proposed for DMFRZ"
 log "[7/9] Waiting out the challenge window (${EPOCH_SECS}s, unchallenged)"
 sleep $(( EPOCH_SECS + 1 ))
 out="$(invoke_submit "$ER_ID" "$DEMO_ADMIN" finalize --event_id "$EVENT_ID")"
+die_on_invoke_error "$out" "finalize"
 record_tx "finalize (event $EVENT_ID)" "$(tx_hash_from "$out")"
 # Substring match against the raw read, not a precise jq field
 # extraction - the same convention deploy/demo-asset-propose.sh
@@ -347,10 +407,12 @@ log "event $EVENT_ID: $EVENT_OUT"
 
 log "[8/9] Trigger, claim, withdraw"
 out="$(invoke_submit "$SERIES_ID" "$DEMO_ADMIN" trigger)"
+die_on_invoke_error "$out" "trigger"
 record_tx "trigger" "$(tx_hash_from "$out")"
 log "series triggered on event $(return_value_from "$out")"
 
 out="$(invoke_submit "$SERIES_ID" "$BUYER" claim --holder "$BUYER_ADDR" --amount "$FILLED")"
+die_on_invoke_error "$out" "claim"
 record_tx "claim ($FILLED DMUSD)" "$(tx_hash_from "$out")"
 log "buyer claimed: $(return_value_from "$out")"
 
@@ -360,6 +422,7 @@ cover_written="$(echo "$position_json" | jq -r '.cover_written')"
 premium_earned="$(echo "$position_json" | jq -r '.premium_earned')"
 WITHDRAW_AMOUNT=$(( collateral - cover_written + premium_earned ))
 out="$(invoke_submit "$SERIES_ID" "$SELLER" withdraw --seller "$SELLER_ADDR" --amount "$WITHDRAW_AMOUNT")"
+die_on_invoke_error "$out" "withdraw"
 record_tx "withdraw ($WITHDRAW_AMOUNT DMUSD)" "$(tx_hash_from "$out")"
 log "seller withdrew: $(return_value_from "$out")"
 
