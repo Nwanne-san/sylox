@@ -219,7 +219,7 @@ pub struct GateResult {
     pub passes: bool,
 }
 
-pub fn history_gate(
+pub(crate) fn history_gate(
     env: &Env,
     asset: &Address,
     newest_final: u64,
@@ -229,26 +229,15 @@ pub fn history_gate(
     let target_span = AGGREGATE_SLOTS_7D as u64;
     let epochs_until_span_ready = target_span.saturating_sub(span_epochs);
 
-    if span_epochs < target_span {
-        return (
-            GateResult {
-                span_epochs,
-                epochs_until_span_ready,
-                present_epochs_7d: 0,
-                newest_slot_present: false,
-                passes: false,
-            },
-            Vec::new(env),
-        );
-    }
-
     let start = newest_final.saturating_add(1).saturating_sub(target_span);
     let window = storage::get_window(env, asset, start, AGGREGATE_SLOTS_7D);
 
     let present_epochs_7d = window.iter().filter(|slot| slot.is_some()).count() as u32;
     let newest_slot_present = window.get(AGGREGATE_SLOTS_7D - 1).flatten().is_some();
 
-    let passes = present_epochs_7d >= MIN_FINAL_EPOCHS_7D && newest_slot_present;
+    let passes = span_epochs >= target_span
+        && present_epochs_7d >= MIN_FINAL_EPOCHS_7D
+        && newest_slot_present;
 
     (
         GateResult {

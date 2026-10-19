@@ -3566,6 +3566,7 @@ fn history_status_167_final_epochs_in_a_row() {
     assert_eq!(status.newest_final, Some(BASE + 166));
     assert_eq!(status.span_epochs, 167);
     assert_eq!(status.epochs_until_span_ready, 1);
+    assert_eq!(status.present_epochs_7d, 167);
     assert!(!status.score_ready);
 
     // Agreement check (test 10): score() must be stale with nothing scored at newest_final
