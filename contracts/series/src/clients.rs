@@ -9,7 +9,6 @@
 use soroban_sdk::{contractclient, Address, Env};
 use sylox_types::{
     AssetEventStatus, Band, CoverGate, EventKind, GuardStatus, SignalSet, SlotState, SubEpoch,
-    SubEpochConfig,
 };
 
 #[contractclient(name = "RiskOracleClient")]
@@ -23,9 +22,9 @@ pub trait RiskOracle {
     /// (hourly) peg ratio, never `live`'s sub-epoch value.
     fn latest(env: Env, asset: Address) -> Option<SignalSet>;
     fn reference_rate(env: Env, asset: Address) -> i128;
-    /// M1's own grace window is measured against the asset's current
-    /// sub-epoch interval, which only `RiskOracle` tracks.
-    fn sub_epoch_config(env: Env, asset: Address) -> Option<SubEpochConfig>;
+    /// M1 measures sub-epoch boundaries with the length in force for
+    /// each hour, which only `RiskOracle` tracks.
+    fn sub_epoch_secs_at(env: Env, asset: Address, hour: u64) -> u64;
 }
 
 #[contractclient(name = "EventRegistryClient")]

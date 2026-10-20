@@ -6,9 +6,10 @@ extern crate std;
 mod integration;
 mod property;
 mod sub_epochs;
+mod ttl;
 
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, IntoVal, Symbol};
 use sylox_types::{
     AssetConfig, AssetEventStatus, CoverGate, EndpointStatus, EventDefinition, EventKind,
     EventState, IssuerFlags, Reference,
@@ -3008,6 +3009,136 @@ fn set_factory_without_governor_auth_traps() {
 
     // No mock_all_auths(): the governor never actually signs this call.
     client.set_factory(&Address::generate(&env));
+}
+
+/// `set_governor` works exactly once: the current governor hands off
+/// to a new address, and a governor-gated call afterward still
+/// succeeds (through `setup()`'s own `mock_all_auths()`, which
+/// approves every `require_auth()` regardless of address; the real
+/// proof the new address is the one actually recorded is
+/// `set_governor_old_governor_rejected_new_governor_accepted` below).
+#[test]
+fn set_governor_succeeds_once() {
+    let env = Env::default();
+    let fx = setup(&env);
+    let new_governor = Address::generate(&env);
+
+    fx.client.set_governor(&new_governor);
+
+    fx.client.set_factory(&Address::generate(&env));
+}
+
+/// `set_governor` cannot run twice: `GovernorAlreadySet` on the
+/// second call, confirmed via `try_set_governor` since this is a real
+/// returned error, not a native auth trap. Same one-time-lock shape
+/// as `set_factory_succeeds_once_then_locks` above.
+#[test]
+fn set_governor_fails_the_second_call() {
+    let env = Env::default();
+    let fx = setup(&env);
+
+    fx.client.set_governor(&Address::generate(&env));
+    let result = fx.client.try_set_governor(&Address::generate(&env));
+
+    assert_eq!(result, Err(Ok(Error::GovernorAlreadySet)));
+}
+
+/// Non-governor cannot call `set_governor`: same native auth trap
+/// pattern as `set_factory_without_governor_auth_traps`.
+#[test]
+#[should_panic]
+fn set_governor_without_governor_auth_traps() {
+    let env = Env::default();
+    let governor = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let staking = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc = Address::generate(&env);
+    let contract_id = env.register(
+        EventRegistry,
+        (
+            governor.clone(),
+            oracle.clone(),
+            staking.clone(),
+            factory.clone(),
+            usdc.clone(),
+        ),
+    );
+    let client = EventRegistryClient::new(&env, &contract_id);
+
+    // No mock_all_auths(): the governor never actually signs this call.
+    client.set_governor(&Address::generate(&env));
+}
+
+/// After a successful handover, the OLD governor is rejected on a
+/// governor-gated call and the NEW governor is accepted, proving
+/// `set_governor` genuinely changed which address is authorized, not
+/// just that the call itself succeeded once.
+#[test]
+fn set_governor_old_governor_rejected_new_governor_accepted() {
+    let env = Env::default();
+    let old_governor = Address::generate(&env);
+    let new_governor = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let staking = Address::generate(&env);
+    let factory = Address::generate(&env);
+    let usdc = Address::generate(&env);
+    let contract_id = env.register(
+        EventRegistry,
+        (
+            old_governor.clone(),
+            oracle.clone(),
+            staking.clone(),
+            factory.clone(),
+            usdc.clone(),
+        ),
+    );
+    let client = EventRegistryClient::new(&env, &contract_id);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &old_governor,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_governor",
+            args: (new_governor.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_governor(&new_governor);
+
+    let new_factory = Address::generate(&env);
+
+    // The old governor is no longer the one recorded: a call it signs
+    // for still traps natively, exactly like any other non-governor
+    // caller.
+    let old_governor_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &old_governor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "set_factory",
+                args: (new_factory.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.set_factory(&new_factory);
+    }));
+    assert!(
+        old_governor_result.is_err(),
+        "the old governor must be rejected once set_governor has handed off"
+    );
+
+    // The new governor, signing for itself, succeeds.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &new_governor,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_factory",
+            args: (new_factory.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_factory(&new_factory);
 }
 
 /// There is no longer a separate `initialize` call to invoke twice

@@ -103,4 +103,8 @@ pub enum Error {
     /// most once; a second call for the same (or an earlier) version is
     /// a no-op request, not a retry of something that failed.
     AlreadyMigrated = 322,
+    /// Governor handover (feat/set-governor-handover): `set_governor`
+    /// called a second time. One-time lock, same shape as
+    /// EventRegistry's `FactoryAlreadySet`.
+    GovernorAlreadySet = 323,
 }

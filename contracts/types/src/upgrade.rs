@@ -22,12 +22,14 @@
 //! confirmed afterward by calling version() post-upgrade (see deploy/
 //! README.md's upgrade procedure).
 //!
-//! Section 17.3's 14 day timelock for Staking/Treasury upgrades (they hold
-//! funds) is NOT enforced here: it belongs to Governor (Section 17),
-//! which is not built yet (contracts/governor is a stub). Known gap,
-//! tracked against the Governor work; do_upgrade and do_migrate below are
-//! the direct, immediate admin-gated calls every other governor-gated call
-//! in this codebase already uses, with no queueing of their own.
+//! Section 17.3's 14 day timelock for upgrades is NOT enforced here: it
+//! belongs to `Governor` (docs/design/governor.md Section 6), which is
+//! the only caller of do_upgrade/do_migrate once a contract's `governor`
+//! address is the Governor contract, and only from its own `execute`
+//! after the timelock. Until that handover, whoever holds the
+//! `governor` address can call them immediately. apply_upgrade and
+//! apply_migration are the same mechanics without the auth check, for
+//! the Governor's own in-process self-upgrade only.
 
 use soroban_sdk::{contractevent, Address, BytesN, ContractExecutable, Env, Symbol};
 
@@ -57,6 +59,16 @@ pub struct Upgraded {
 /// caller).
 pub fn do_upgrade(env: &Env, governor: &Address, current_version: u32, new_wasm_hash: BytesN<32>) {
     governor.require_auth();
+    apply_upgrade(env, current_version, new_wasm_hash);
+}
+
+/// The swap and the `Upgraded` event, with NO auth check of its own.
+/// Only for `Governor`'s in-process self-upgrade (docs/design/
+/// governor.md Section 6.3): the Governor's own address cannot
+/// authorize a call into itself, so its `execute` checks the signer
+/// threshold and the 14 day timelock first and then calls this
+/// directly. Every other contract goes through `do_upgrade`.
+pub fn apply_upgrade(env: &Env, current_version: u32, new_wasm_hash: BytesN<32>) {
     env.deployer()
         .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
     Upgraded {
@@ -92,6 +104,14 @@ pub fn do_upgrade(env: &Env, governor: &Address, current_version: u32, new_wasm_
 /// ever".
 pub fn do_migrate(env: &Env, governor: &Address, key: &Symbol, target_version: u32) -> bool {
     governor.require_auth();
+    apply_migration(env, key, target_version)
+}
+
+/// `do_migrate`'s version check and write, with NO auth check of its
+/// own. Only for `Governor`, whose own migration runs automatically on
+/// its first state-changing call under new code (docs/design/
+/// governor.md Section 6.3), not through a governor-authorized call.
+pub fn apply_migration(env: &Env, key: &Symbol, target_version: u32) -> bool {
     let current: u32 = env.storage().instance().get(key).unwrap_or(0);
     if current >= target_version {
         return false;

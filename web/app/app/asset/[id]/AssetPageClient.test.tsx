@@ -78,7 +78,12 @@ describe("AssetPageClient", () => {
     fetchAssetPageData.mockResolvedValue(okData());
     renderAssetPage(baseHeader.asset);
 
-    expect(await screen.findByText("USDC")).toBeInTheDocument();
+    // "USDC" now also appears in the breadcrumb (it shows the real
+    // asset code once the header loads, not just the shortened address
+    // - see the breadcrumb-specific tests below), so this checks the
+    // <h1> specifically rather than any "USDC" text on the page.
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent("USDC");
     expect(screen.getByText("centre.io")).toBeInTheDocument();
     expect(screen.getByText("Normal")).toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
@@ -162,12 +167,44 @@ describe("AssetPageClient", () => {
     );
     renderAssetPage(baseHeader.asset);
 
-    // The <h1> always shows the asset code; the shortened address
-    // fallback appears three times once there's no home domain: the
-    // domain line, the address subtitle just below it, and the
-    // breadcrumb's own separate instance of the same shortened form.
-    await screen.findByText("USDC");
-    expect(screen.getAllByText("CBIE…DAMA")).toHaveLength(3);
+    // The shortened address fallback appears twice once there's no home
+    // domain: the domain line and the address subtitle just below it.
+    // The breadcrumb is a separate matter - it shows the real asset
+    // code (header.code) once the header has loaded, not the shortened
+    // address, regardless of whether homeDomain is set (see the
+    // breadcrumb-specific tests below) - "USDC" here, same as the <h1>.
+    const heading = await screen.findByRole("heading", { level: 1 });
+    expect(heading).toHaveTextContent("USDC");
+    expect(screen.getAllByText("CBIE…DAMA")).toHaveLength(2);
+  });
+
+  it("breadcrumb shows the real asset code once the header loads, not the shortened address", async () => {
+    fetchAssetPageData.mockResolvedValue(okData());
+    renderAssetPage(baseHeader.asset);
+
+    await screen.findByRole("heading", { level: 1 });
+    const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(breadcrumb).toHaveTextContent("USDC");
+    expect(breadcrumb).not.toHaveTextContent("CBIE…DAMA");
+  });
+
+  it("breadcrumb shows the shortened address before the header has loaded", () => {
+    fetchAssetPageData.mockReturnValue(new Promise(() => {})); // Never resolves - stays in the loading state.
+    renderAssetPage(baseHeader.asset);
+
+    const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(breadcrumb).toHaveTextContent("CBIE…DAMA");
+  });
+
+  it("breadcrumb falls back to the shortened address if the header section itself errored", async () => {
+    fetchAssetPageData.mockResolvedValue(
+      okData({ header: { status: "error", message: "boom" } }),
+    );
+    renderAssetPage(baseHeader.asset);
+
+    await screen.findByText(/couldn't load this section/i);
+    const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(breadcrumb).toHaveTextContent("CBIE…DAMA");
   });
 
   it("titles the Confirmed/Live section 'Peg price'", async () => {
@@ -211,6 +248,37 @@ describe("AssetPageClient", () => {
 
     expect(await screen.findByText(/latest hour: 0\.9910 peg/i)).toBeInTheDocument();
     expect(screen.getByText(/can still be challenged until 14:30 utc/i)).toBeInTheDocument();
+  });
+
+  it("shows a 'still posting' note instead of a challenge deadline when pendingUntil is null (the hour's own sub-epochs aren't fully decided yet)", async () => {
+    // Regression for "can still be challenged until NaN:NaN UTC":
+    // asset-data.ts's fetchConfirmed now maps the contract's
+    // HOUR_PENDING_SENTINEL to pendingUntil: null rather than a raw
+    // bigint a date formatter would overflow on. This asserts the UI
+    // side never calls formatChallengeDeadline for that case and never
+    // renders "NaN" anywhere.
+    fetchAssetPageData.mockResolvedValue(
+      okData({
+        confirmed: {
+          status: "ok",
+          value: {
+            confirmed: { epoch: BigInt(99), pegRatio: 0.9998, score: 12, band: normalBand },
+            latestPending: {
+              epoch: BigInt(100),
+              pegRatio: 0.991,
+              pendingUntil: null,
+            },
+          },
+        },
+      }),
+    );
+    renderAssetPage(baseHeader.asset);
+
+    expect(
+      await screen.findByText(/latest hour: 0\.9910 peg, provisional while its sub-epochs are still posting\./i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/can still be challenged until/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/NaN/i)).not.toBeInTheDocument();
   });
 
   it("shows 'No live update yet' when live() resolves to None", async () => {
@@ -319,7 +387,7 @@ describe("AssetPageClient", () => {
   it("shows no active-event card when the count is zero", async () => {
     fetchAssetPageData.mockResolvedValue(okData());
     renderAssetPage(baseHeader.asset);
-    await screen.findByText("USDC");
+    await screen.findByRole("heading", { level: 1 });
     expect(screen.queryByText(/active event/i)).not.toBeInTheDocument();
   });
 
@@ -333,7 +401,7 @@ describe("AssetPageClient", () => {
     expect(await screen.findByText(/cover_gate unreachable/i)).toBeInTheDocument();
     // ...while an unrelated section still renders normally.
     expect(screen.getByText("0.9998")).toBeInTheDocument();
-    expect(screen.getByText("USDC")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("USDC");
   });
 
   it("never renders a missing or pending hour as a zero value in the chart", async () => {
@@ -412,6 +480,6 @@ describe("AssetPageClient", () => {
     renderAssetPage(baseHeader.asset);
 
     expect(await screen.findByText(/ring\(\) unreachable/i)).toBeInTheDocument();
-    expect(screen.getByText("USDC")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("USDC");
   });
 });

@@ -20,7 +20,7 @@ const COMING_SOON_ITEMS = ["Markets", "My positions", "Faucet"];
 
 const EXTERNAL_LINKS: NavItem[] = [
   { label: "Website", href: "https://sylox.xyz" },
-  { label: "Docs", href: "https://github.com/Sylox-labs/sylox/blob/main/technical-doc.md" },
+  { label: "Docs", href: "https://docs.sylox.xyz/docs" },
   { label: "Repo", href: "https://github.com/Sylox-labs/sylox" },
 ];
 

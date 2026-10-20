@@ -717,3 +717,54 @@ fn full_cycle_real_risk_oracle_real_staking_and_real_treasury() {
          liabilities once every claim has settled"
     );
 }
+
+/// docs/design/held-repost-disputes.md D4: an hourly dispute nobody
+/// closes before the ring rotates past its epoch. The timeout, called 11
+/// days after the dispute (the ring holds 240 hours), still releases the
+/// disputer's bond and brings the keeper's `open_dispute_count` back to
+/// zero. Only the epoch's own Final mark is gone with the rotated slot.
+#[test]
+fn an_hourly_dispute_timed_out_after_the_ring_rotated_still_releases_the_bonds() {
+    let env = Env::default();
+    // The real Treasury: every epoch that goes Final pays its keeper.
+    let fx = setup_with_treasury(&env);
+    fund_bucket(&fx, &env, TreasuryBucket::KeeperRewards, 1_000_000_000_000);
+    let asset = Address::generate(&env);
+    fx.oracle
+        .add_asset(&asset_config(&env, &asset, &Address::generate(&env)));
+    let keeper = Address::generate(&env);
+    fx.staking.add_keeper(&keeper);
+    fx.usdc_admin_client.mint(&keeper, &params::KEEPER_BOND);
+    fx.staking.stake(&keeper, &params::KEEPER_BOND);
+
+    env.ledger().set_timestamp(params::EPOCH_SECS + 10);
+    fx.oracle
+        .post_signals(&keeper, &asset, &signal_set(&env, 0, &keeper));
+    let disputer = Address::generate(&env);
+    let dispute_bond = 10_000_000_000i128;
+    fx.usdc_admin_client.mint(&disputer, &dispute_bond);
+    let disputed_at = env.ledger().timestamp();
+    fx.oracle
+        .dispute_signals(&disputer, &asset, &0, &BytesN::from_array(&env, &[9u8; 32]));
+    assert_eq!(fx.staking.keeper(&keeper).unwrap().open_dispute_count, 1);
+
+    // 240 newer epochs rotate the ring past epoch 0's slot.
+    for epoch in 1..=240u64 {
+        env.ledger()
+            .set_timestamp((epoch + 1) * params::EPOCH_SECS + 10);
+        fx.oracle
+            .post_signals(&keeper, &asset, &signal_set(&env, epoch, &keeper));
+    }
+
+    env.ledger().set_timestamp(disputed_at + 11 * 86_400);
+    fx.oracle.resolve_signal_dispute_timeout(&asset, &0);
+
+    let bond_key = sylox_types::BondKey::SignalDispute(asset.clone(), 0);
+    assert_eq!(fx.staking.bond(&bond_key), None);
+    assert_eq!(fx.staking.claimable(&disputer), dispute_bond);
+    assert_eq!(fx.staking.keeper(&keeper).unwrap().open_dispute_count, 0);
+    assert!(
+        !fx.oracle.is_final(&asset, &0),
+        "the rotated slot is gone, so epoch 0 is never marked Final"
+    );
+}

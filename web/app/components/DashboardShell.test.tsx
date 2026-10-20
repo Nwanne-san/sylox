@@ -77,7 +77,7 @@ describe("DashboardShell", () => {
 
     expect(screen.getByRole("link", { name: "Docs" })).toHaveAttribute(
       "href",
-      "https://github.com/Sylox-labs/sylox/blob/main/technical-doc.md",
+      "https://docs.sylox.xyz/docs",
     );
     expect(screen.getByRole("link", { name: "Repo" })).toHaveAttribute(
       "href",

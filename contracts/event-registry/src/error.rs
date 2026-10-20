@@ -113,4 +113,8 @@ pub enum Error {
     /// called a second time. The real `MarketFactory` address is
     /// written once, then permanently locked.
     FactoryAlreadySet = 217,
+    /// Governor handover (feat/set-governor-handover): `set_governor`
+    /// called a second time. Same one-time-lock shape as
+    /// `FactoryAlreadySet` above.
+    GovernorAlreadySet = 218,
 }

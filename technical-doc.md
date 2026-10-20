@@ -1,10 +1,46 @@
+<img width="2000" height="705" alt="sylox-lockup-horizontal-mono-oatmeal" src="https://github.com/user-attachments/assets/f942d26b-1746-4ed5-8658-9e4db0398595" />
+
 # Sylox Protocol: Technical Documentation
 
 Version: v1.5 draft, October 9, 2026 · Author: David Ejere
 
-## Changelog v1.5
+---
 
-Driven by an SCF delegate's observation that hourly epochs mean a user can wait up to an hour to see new data. Spec only in this revision: no contract code changes. The implementation PR follows once `feat/markets` Part A merges.
+## Table of contents
+
+- [Changelog v1.5](#changelog-v15)
+- [Changelog v1.4](#changelog-v14)
+- [Changelog v1.3](#changelog-v13)
+- [Changelog v1.2](#changelog-v12)
+- [Changelog v1.1](#changelog-v11)
+- [1. Overview and conventions](#1-overview-and-conventions)
+- [2. System architecture](#2-system-architecture)
+- [3. Contract inventory and deployment topology](#3-contract-inventory-and-deployment-topology)
+- [4. Core data model](#4-core-data-model)
+- [5. Anchor Risk Oracle](#5-anchor-risk-oracle)
+- [6. Risk score](#6-risk-score)
+- [7. Reporter network and endpoint probing](#7-reporter-network-and-endpoint-probing)
+- [8. Credit Event Registry](#8-credit-event-registry)
+- [9. Protection Markets](#9-protection-markets)
+- [10. Settlement and accounting math](#10-settlement-and-accounting-math)
+- [11. Risk limits and manipulation defences](#11-risk-limits-and-manipulation-defences)
+- [12. Contract API reference](#12-contract-api-reference)
+- [13. Events reference](#13-events-reference)
+- [14. Error codes](#14-error-codes)
+- [15. Storage layout and TTL strategy](#15-storage-layout-and-ttl-strategy)
+- [16. Roles, authorization and access control](#16-roles-authorization-and-access-control)
+- [17. Governance, parameters and upgrades](#17-governance-parameters-and-upgrades)
+- [18. Offchain services](#18-offchain-services)
+- [19. TypeScript SDK reference](#19-typescript-sdk-reference)
+- [20. Integration guides](#20-integration-guides)
+- [21. Security: invariants, threats and testing](#21-security-invariants-threats-and-testing)
+- [22. Deployment, configuration and operations](#22-deployment-configuration-and-operations)
+- [23. Parameter reference](#23-parameter-reference)
+- [24. Glossary and open technical questions](#24-glossary-and-open-technical-questions)
+
+---
+
+## Changelog v1.5
 
 **Footprint-fix revision, within v1.5 (Section 5.9, S3-S5)**
 
@@ -20,6 +56,12 @@ Found and fixed while implementing the sub-epoch design above. Rule changes only
 - A new shared constant, `MAX_DEPEG_WINDOW_EPOCHS` (`sylox_types::time`), is the one source `register_definition`'s own window check and `MAX_UNBUILT_HOURS_SCANNED_BY_COVER_GATE`'s build-time assertion both read, so the two limits can never silently drift apart. Open sub-epoch disputes keep hours unbuilt, but cannot cause `UnbuiltBacklog`, because the scanned window is bounded by this constant. Sections 5.9, S5; 11.6.
 - `RiskOracle.sub_peg_ratios_in_span_batch` fetches `Sub(asset)`'s own packed ring entry once per call, not once per `(hour, sub)` pair. Section 15.3.
 - `storage::sub_slot_still_belongs_to` also takes `now`: an `Empty` ring position belongs to `sub_start` only while `sub_start`'s own 5 hour span has not yet elapsed, not for any `Empty` position regardless of age. Section 5.9, S2.
+
+**Score staleness split, within v1.5 (Section 5.5)**
+
+Found and fixed while implementing the sub-epoch design above: a sub-epoch-built hour's own finality lag (its own close, the last sub-epoch's dispute window, and the live poster's own cron interval before a build is even attempted) could exceed the single staleness threshold that then existed, before the hour had any realistic chance to build. `score(asset).stale` could read stale while fresh data was actively posting.
+
+- One shared `stale_after_epochs` threshold is split into two: `stale_after_epochs` (unchanged, default 3) still gates `is_stale(asset)` only, judged against the newest posted epoch, for the depeg coverage bound in Section 8.6. A new `score_stale_after_epochs` (default 5) gates `score(asset).stale` and `check_stale(asset)` only, judged against the stored score's own epoch, sized for a sub-epoch-built hour's own finality lag. Section 5.5.
 
 **S1-S2. A governance-set posting interval underneath the hour, not instead of it**
 
@@ -752,8 +794,11 @@ The `RiskOracle` contract stores one `SignalSet` per asset per epoch, posted by 
 
 ### 5.5 Staleness
 
-- An asset is **stale** if the risk score has not been computed from a Final epoch within `stale_after_epochs` (default 3) epochs of the current one. A brand new asset with fewer than 168 posted epochs (the 7 day baseline every score component needs, Section 6.5) also reads as stale, even while actively posting: there is not yet enough history to compute a trustworthy score at all, which is a different condition from "the data has gone old" but uses the same `stale` field, since nothing else in this spec distinguishes them.
-- Two different reads can disagree about whether an asset is stale, by design: `is_stale(asset)` judges against the newest *posted* epoch; `score(asset).stale` and `check_stale(asset)` both judge against the *stored score's own epoch* (ADR-009). An asset whose finality has stalled behind a gap (ADR-008) can keep posting fresh epochs while its score stays frozen on an old one; `is_stale` alone would miss this, `score().stale` and `check_stale` catch it. Prefer `check_stale`/`score().stale` wherever "is this asset's risk data current" is the actual question.
+- Two different parameters govern staleness, read by two different sets of callers, because they answer two different questions:
+  - `stale_after_epochs` (default 3) gates `is_stale(asset)` only, judged against the newest *posted* epoch. `Series` and `MarketFactory` read this (through `is_stale`) to block new cover and new series. Section 8.6's depeg coverage logic depends on this staying a small, fixed bound on the open epoch plus keeper backlog (Section 8.6), so it is not sized around how long a sub-epoch-built hour can take to become Final; it predates sub-epoch posting (Section 5.9) entirely.
+  - `score_stale_after_epochs` (default 5) gates `score(asset).stale` and `check_stale(asset)` only, judged against the *stored score's own epoch* (ADR-009): the signal this section calls "is this asset's risk data current." It is sized from the real structural lag a sub-epoch-built hour can carry between its own close and the next epoch becoming eligible to score from (one epoch for the hour's own close, plus the signal dispute window, plus the live poster's own cron interval rounded up to a full epoch, plus one epoch of slack), so a score built from a sub-epoch-posted hour does not read stale before that hour had any realistic chance to finish building.
+  - An asset whose finality has stalled behind a gap (ADR-008) can keep posting fresh epochs while its score stays frozen on an old one; `is_stale` alone would miss this, `score().stale` and `check_stale` catch it. Prefer `check_stale`/`score().stale` wherever "is this asset's risk data current" is the actual question, and `is_stale` wherever "is new cover or a new series safe to open" is the question (ADR-009).
+- A brand new asset with fewer than 168 posted epochs (the 7 day baseline every score component needs, Section 6.5) also reads as stale, even while actively posting: there is not yet enough history to compute a trustworthy score at all, which is a different condition from "the data has gone old" but uses the same `stale` field, since nothing else in this spec distinguishes them.
 - While stale: `RiskScore.stale = true`; `MarketFactory` blocks new series and `Series` blocks new cover on that asset; existing cover is unaffected.
 - Staleness never triggers a credit event by itself.
 - `asset_stale` is emitted once per transition into stale, not once per epoch spent stale (ADR-009); `check_stale(asset)` is the permissionless call that actually detects and announces the transition, called once per epoch for every asset by the monitor (Section 22.4).
@@ -806,7 +851,7 @@ sequenceDiagram
   Oracle-->>Keeper: signals_posted event
 
   alt no dispute within signal_dispute_secs
-    Oracle->>Oracle: effectively Final once signal_dispute_secs elapses; observed and announced by the backward scan on the next state changing call for this asset (ADR-008)
+    Oracle->>Oracle: effectively Final once signal_dispute_secs elapses, then observed and announced by the backward scan on the next state changing call for this asset (ADR-008)
     Note over Oracle,Staking: Staking.reward_keeper exists but, as built, nothing calls it here yet (known gap, Section 24.2)
     Oracle-->>Keeper: signals_final event (once, when first observed Final)
   else disputed
@@ -846,7 +891,7 @@ Tier 1 checks (Section 8.2), the cover gate (Section 9.4) and the 24 hour and 7 
 - **Missing epochs:** an `Empty` slot, or one still `Pending` or `Disputed` when a check runs, is missing. Missing epochs count neither for nor against a Depeg (Section 8.2) nor against the score's own aggregates (Section 6.5): a missing epoch's contribution to a sum is 0 and uncounted, and a missing epoch is excluded from `peg_ratio_p10`'s percentile input entirely, not treated as present with some default value.
 - **`final_announced` flag:** one byte per slot (layout version 2) marking whether `signals_final` has already been emitted for that epoch, so the backward scan never re-announces the same epoch. Set `true` only when a scan or a resolution first observes the epoch Final; reset to unannounced on a repost after an overturn. Not part of the `RingSlot` shape `ring(asset)` returns; it is bookkeeping for event emission, not signal data.
 - **Encoding:** slots are stored packed as fixed width fields, no field names: 112 bytes per slot (106 used, padded for fixed offsets), plus a 9 byte header (layout version, slot count, slot width) validated on every read, 26,889 bytes for a full 240 slot ring. Measured against a naive `Vec<RingSlot>` using the SDK's own `#[contracttype]` derive (which encodes a struct as an XDR map of named fields): about 440 bytes per slot, 105,732 bytes for 240 slots, 61% over `contract_data_entry_size_bytes` (65,536). The packed encoding is required to fit at all; it is not achievable by storing the existing `RingSlot` type directly, only by hand (de)serializing it. The `ring(asset)` read still returns `Vec<RingSlot>` to callers; only the persisted representation is packed.
-- **Write cost:** one ring write per accepted posting, plus the `Signals(asset, epoch)` entry kept for 30 days of direct history (Section 15.2). Measured against a full 240 slot ring: 1,891,655 CPU instructions (0.47% of `tx_max_instructions`), 28,012 bytes written (21.21% of `tx_max_write_bytes`, the binding constraint, though still well under it). The packed single entry design fits with headroom; no paging fallback is needed.
+- **Write cost:** one ring write per accepted posting, plus the `Signals(asset, epoch)` entry kept for 10 days of direct history (Section 15.2). Measured against a full 240 slot ring: 1,891,655 CPU instructions (0.47% of `tx_max_instructions`), 28,012 bytes written (21.21% of `tx_max_write_bytes`, the binding constraint, though still well under it). The packed single entry design fits with headroom; no paging fallback is needed.
 
 ### 5.9 Sub-epochs and the hourly roll-up (v1.5)
 
@@ -856,6 +901,9 @@ Everything above this section is unchanged: the hour, the 240 slot ring, the 72 
 
 - Allowed values: 300, 600, 900, 1,200, 1,800, 3,600 seconds (5 to 60 minutes), each dividing 3,600 evenly. Default 300. Below 300 is a build constant, not a governance floor: going lower needs a new build, deliberately, so `Sub(asset)`'s own ring stays small (S3) and a single keeper is capped at 288 posts per asset per day at the default (Section 23).
 - A change takes effect from the next hour boundary only: store `(sub_epoch_secs, effective_from_hour)` and expose a read of the pending value, so no sub-epoch already posted, or postable before that boundary, is ever reinterpreted under a different length.
+- The next change keeps the length actually in force as the current value: a pending value whose hour has arrived is promoted into `sub_epoch_secs` on that write, and a value still pending is replaced. `sub_epoch_secs_at(asset, hour)` (Section 12.1) reads the length in force for any hour.
+- **Each hour keeps the length it was posted at.** The first sub-epoch posted for an hour records that hour's `sub_epoch_secs` (`HourSubEpochSecs(asset, hour)`, Section 15.2), and every later read of that hour, `sub_epoch_secs_at` included, resolves it from that record. An unbuilt hour can be built at any age, so the config alone is not enough: `SubEpochConfig` stores one transition, and after a later change it resolves hours from before the previous change to the wrong length. Hours with no sub-epoch posted resolve through the config. `EventRegistry.cover_gate`'s batched read resolves through the config only, never the record, so its footprint stays fixed (Section 15.3); that is exact for every hour it reads, which are all inside `Sub(asset)`'s 5 hour span.
+- After a change takes effect, the next change is rejected (`SubEpochChangeTooSoon`) until 240 hours (10 days) after its `effective_from_hour`, the ring's own span. This only limits how often the length changes; the per-hour record is what keeps old hours correct. A change still pending (its hour not yet arrived) may be replaced at any time.
 - `sub_epoch_secs = 3,600` means exactly one sub-epoch per hour, numbered `sub = 0`: today's behavior, unchanged, reachable at any time by setting the parameter back.
 
 **S2. Posting and disputes**
@@ -865,13 +913,14 @@ Everything above this section is unchanged: the hour, the 240 slot ring, the 72 
 - **Backfill.** A sub-epoch can be backfilled for `sub_backfill_secs` only (new parameter, default 2 hours). Past that, the keeper backfills the whole hour through today's hourly path (`window_secs`, Section 5.2), which stays in place unchanged as the fallback. This is what keeps `Sub(asset)`'s own ring small (S3): it only ever needs to hold recent sub-epochs, never a full `window_secs` of them.
 - **One writer per hour.** An hour is posted through exactly one of the two paths, never both: the hourly fallback path is accepted only for an hour with no sub-epoch posted yet, and once an hour has a sub-epoch posted, every later post for that hour (whether another sub-epoch or an hourly fallback) must go through the sub-epoch path. `HourAlreadyPosted` (new error, Section 14) rejects a fallback hourly post against an hour that already has at least one sub-epoch, and the reverse case: a sub-epoch post against an hour that was already posted through the fallback path. This keeps "which path wrote this hour" unambiguous without needing to merge data from both paths for the same hour.
 - **Known trade-off at an outage's edge.** The hour in which a keeper outage BEGINS already has some sub-epochs posted before the outage started, so it can never use the hourly fallback (the rule above); if fewer than `min_sub_coverage_bps`'s worth posted before the outage, that hour builds Empty once its backfill window closes, staying missing, where a pre-v1.5 keeper could still have recovered it with a single hourly backfill post within `window_secs`. Every hour entirely INSIDE the outage has no sub-epoch posts at all, so it keeps the hourly fallback exactly as a missing hour does today. This costs at most one additional missing hour per outage, at either edge, which is inside Depeg's own `max_missing_epochs` tolerance (6 of 72) and the score's own missing-epoch handling (Section 6.5); it is not fixed further in this revision.
-- **Reposting an overturned sub-epoch (ADR-005, extended to sub-epochs).** An overturned sub-epoch (a dispute the disputer won) reopens for reposting, mirroring ADR-005's own "an overturned epoch reopens for reposting" rule for the hourly path, with one difference a sub-epoch has that an hourly epoch does not: a sub-epoch's own `sub_backfill_secs` window (2 hours) can be, and usually is, far shorter than the ruling that overturns it (`signal_dispute_ruling_secs`, up to 6 days), so a repost window anchored only to the sub-epoch's own original close would almost always have already passed by the time the overturn happens. A repost is instead accepted until `max(sub_close, overturned_at) + sub_backfill_secs`, anchored to whichever of the two is later: the sub-epoch's own original close (the ordinary case, nothing overturned) or the ruling that overturned it (reliably reachable regardless of how long the ruling took). Where the repost lands depends on whether `Sub(asset)`'s own ring position for that `sub_start` still belongs to it (S3): it does if the position already holds `sub_start`'s own identity, OR if it is `Empty` AND `now` has not yet passed `sub_start` plus the ring's own 5 hour span (an `Empty` position past that point belongs to whichever LATER sub-epoch's rotation now owns it, even if nothing was ever posted there) — in either case the repost writes directly into the ring, same as any fresh post. Otherwise (a different, non-`Empty` `sub_start` occupies it, always a strictly newer one, or the original position's own span has simply elapsed with nothing posted to it) the repost writes into the hour's own `HeldHour` entry instead, never overwriting a position that no longer belongs to it. Either way, the hour's own provisional roll-up and `provisional_sub_coverage` (S4) are recomputed using the same exclusion rule every other roll-up uses. **One repost per original overturn.** If the repost itself is later overturned too, that sub-epoch is permanently excluded, with no second repost: the longest an hour can wait on one sub-epoch is two full dispute cycles (post, dispute, overturn, repost, dispute, overturn again), never more. Until a repost's own window closes (or a repost arrives and is itself decided), the hour must not build: a sub-epoch awaiting a possible repost counts the same as one still inside its own backfill window, blocking the build exactly as `MissingWithinBackfill` already does, so the overturned value's own absence is never mistaken for final, decided data before the repost opportunity has actually run out. **Worst-case wait:** one cycle is at most `signal_dispute_secs + signal_dispute_ruling_secs + sub_backfill_secs` (7,200 + 518,400 + 7,200 = 532,800 seconds, about 6.17 days); two cycles, the absolute ceiling on how long one hour can stay unbuilt because of a single contested sub-epoch, is about 12.33 days (1,065,600 seconds).
+- **Reposting an overturned sub-epoch (ADR-005, extended to sub-epochs).** An overturned sub-epoch (a dispute the disputer won) reopens for reposting, mirroring ADR-005's own "an overturned epoch reopens for reposting" rule for the hourly path, with one difference a sub-epoch has that an hourly epoch does not: a sub-epoch's own `sub_backfill_secs` window (2 hours) can be, and usually is, far shorter than the ruling that overturns it (`signal_dispute_ruling_secs`, up to 6 days), so a repost window anchored only to the sub-epoch's own original close would almost always have already passed by the time the overturn happens. A repost is instead accepted until `max(sub_close, overturned_at) + sub_backfill_secs`, anchored to whichever of the two is later: the sub-epoch's own original close (the ordinary case, nothing overturned) or the ruling that overturned it (reliably reachable regardless of how long the ruling took). Where the repost lands depends on whether `Sub(asset)`'s own ring position for that `sub_start` still belongs to it (S3): it does if the position already holds `sub_start`'s own identity, OR if it is `Empty` AND `now` has not yet passed `sub_start` plus the ring's own 5 hour span (an `Empty` position past that point belongs to whichever LATER sub-epoch's rotation now owns it, even if nothing was ever posted there); in either case the repost writes directly into the ring, same as any fresh post. Otherwise (a different, non-`Empty` `sub_start` occupies it, always a strictly newer one, or the original position's own span has simply elapsed with nothing posted to it) the repost writes into the hour's own `HeldHour` entry instead, never overwriting a position that no longer belongs to it. Either way, the hour's own provisional roll-up and `provisional_sub_coverage` (S4) are recomputed using the same exclusion rule every other roll-up uses. **One repost per original overturn.** If the repost itself is later overturned too, that sub-epoch is permanently excluded, with no second repost: the longest an hour can wait on one sub-epoch is two full dispute cycles (post, dispute, overturn, repost, dispute, overturn again), never more. Until a repost's own window closes (or a repost arrives and is itself decided), the hour must not build: a sub-epoch awaiting a possible repost counts the same as one still inside its own backfill window, blocking the build exactly as `MissingWithinBackfill` already does, so the overturned value's own absence is never mistaken for final, decided data before the repost opportunity has actually run out. **Worst-case wait:** one cycle is at most `signal_dispute_secs + signal_dispute_ruling_secs + sub_backfill_secs` (7,200 + 518,400 + 7,200 = 532,800 seconds, about 6.17 days); two cycles with both rulings on time is about 12.33 days (1,065,600 seconds). The absolute ceiling, with the second dispute closed by its timeout at the last ledger of its `SubDispute` (7 days), is about 13.25 days. **Disputing a repost.** A repost is disputable within its own `pending_until` wherever it lands: once an hour is held, `dispute_sub_signals` reads the sub-epoch from `HeldHour` only, with no fallback to the ring, the same precedence every other reader of a held hour uses (S3). **Ruling deadline.** `resolve_signal_dispute` and `resolve_sub_signal_dispute` accept a ruling only before `opened_at + signal_dispute_ruling_secs`; from that instant, the same one at which the timeouts open, only the timeout can close the dispute (`RulingDeadlinePassed`, Section 14). Both timeouts are permissionless, and the keeper service calls every due one each epoch. A dispute nobody closes in time stays open, with its bonds locked and its hour unbuilt, until someone calls its timeout; its records are archived, not lost, and the next call restores them (`docs/design/held-repost-disputes.md` Section 7.1).
 
 **S3. Storage: `Sub(asset)`, a second packed ring**
 
 - One packed ring per asset, same encoding as `Ring(asset)` (Section 5.8: fixed width fields, no field names, `SLOT_BYTES` per slot plus a 9 byte header), sized to outlive the worst case a sub-epoch dispute needs: `sub_backfill_secs + signal_dispute_secs + 3,600` seconds of sub-epochs, the one extra hour covering the time a scan or a resolution takes to actually run at the deadline instant (the same reasoning `risk-oracle/src/lib.rs`'s own `SIGNAL_DISPUTE_RULING_SECS` const assertion already uses for `Ring(asset)`, Section 23).
 - **Fixed at 60 slots, never resized, always spanning a fixed 5 hour grid.** `(sub_backfill_secs + signal_dispute_secs + 3,600) / 300 = (7,200 + 7,200 + 3,600) / 300 = 60` slots, `60 * 112 + 9 = 6,729` bytes, about 10.3% of the 65,536 byte `contract_data_entry_size_bytes` limit. The ring's position function is anchored to the fixed 300 second (5 minute) grid, not to the asset's current `sub_epoch_secs`: `position = (sub_start / 300) % 60`, where `sub_start = hour * 3,600 + sub * sub_epoch_secs` is the sub-epoch's own START time, not the time it was posted (so a backfilled post lands on the slot its own interval owns, never on whatever slot "now" happens to occupy). Every allowed `sub_epoch_secs` value is a multiple of 300, so every sub-epoch's `sub_start` always falls exactly on this grid. Because of this fixed anchoring, `Sub(asset)` always spans exactly 5 hours of wall-clock time (the 2 hours of `sub_backfill_secs`, 2 hours of `signal_dispute_secs`, and 1 hour of margin the sizing formula above adds up), at every `sub_epoch_secs` value: a slower interval uses fewer of the 60 slots per rotation (6 of them at 1,800s, 1 of them at 3,600s), never more wall-clock span. Each slot stores its own `sub_start` timestamp as its identity, not `(hour, sub)`: what `sub` means depends on which `sub_epoch_secs` governed that hour, so after an interval change `(hour, sub)` alone cannot be read back reliably, while a timestamp is unambiguous regardless of any later interval change. A read checks the slot's stored `sub_start` against the `sub_start` being asked about, the same stored-identity check `slot_for_epoch` (`event-registry/src/lib.rs`) already uses for `Ring(asset)`'s own stale-slot detection: a mismatch is treated as missing, not misread as the wrong sub-epoch's data. This means a `sub_epoch_secs` change (S1) needs no re-encoding of `Sub(asset)` at all: it is a pure config change, exactly as S1 states. Since a disputed sub-epoch is copied out to `SubDispute` the moment it is disputed (below), the fixed 5 hour ring span never cuts a ruling short: a ruling that takes up to `signal_dispute_ruling_secs` (6 days) lives entirely outside the ring once disputed.
 - **Disputes.** A disputed sub-epoch is copied out to its own `SubDispute(asset, hour, sub)` persistent entry the moment `dispute_signals` is called against it (mirroring `Overturned(asset, epoch)`'s own existing move-out-of-the-ring pattern, Section 15.1), so a ruling that takes up to `signal_dispute_ruling_secs` (6 days) can still read this ONE sub-epoch's own state correctly however far `Sub(asset)`'s ring has rotated underneath it. `SubDispute` alone is not enough to keep the HOUR itself correct, though: the hour's build also needs every OTHER sub-epoch's own data, and the ring's fixed 5 hour span is far shorter than the 6 day ruling deadline, so by the time a slow ruling arrives, the ring has typically rotated past the hour's entire footprint, not just the disputed slot. The moment ANY sub-epoch in an hour is disputed, every one of that hour's OTHER currently-readable (Pending or Final) sub-epochs, plus the disputed one's own pre-dispute data, is copied out to one `HeldHour(asset, hour)` entry (a `Map<sub, ...>` of the same roll-up fields `Sub(asset)`'s own slots carry, at most 12 entries, well under 1.3 KB); any sub-epoch of that hour posted afterward is written into the same entry as it posts. If the ruling upholds the keeper, the sub-epoch's value comes back from this held copy; if it overturns, that sub-epoch's own held entry is removed and excluded from the roll-up exactly as an ordinary overturned sub-epoch is. The hour itself stays `Disputed` in `Ring(asset)` for exactly as long as any of its sub-epochs has an open `SubDispute` (S4), never `Empty`, so a slow sub-epoch dispute cannot desync the ring from cure tracking the way an `Empty`-while-waiting hour would; `HeldHour` is cleared once the hour builds.
+  **`HeldHour` outlives the hour's last open dispute by one day.** Every write that extends it uses the `SubDispute` lifetime plus one day, so a timeout at the last ledger of a `SubDispute` still finds the held hour and builds it in the same call.
   **`HeldHour` is read by the build and dispute paths only, never by the gate.** `build_hour` and the hour's own `Disputed`-tracking (S4) read `HeldHour` once it exists for an hour, falling back to `Sub(asset)`'s ring directly only for the overwhelming majority of hours that never have any dispute at all; either source's own stored `state` is trusted directly, never a separate `SubDispute` lookup (`dispute_sub_signals`, `resolve_sub_signal_dispute` and `resolve_sub_dispute_timeout` all write `state` to whichever of `HeldHour`/`Sub(asset)` is the current source of truth for that sub-epoch, in the same call that changes it, so a later reader never needs to cross-check `SubDispute` to know a sub-epoch's current disposition; `SubDispute` itself is read only by those three dispute-resolution calls, for the dispute's own `disputer`/`alt_hash`/`opened_at` fields). `EventRegistry.cover_gate` is deliberately NOT one of those readers (S5): an earlier revision had the gate read `HeldHour` for an hour whose sub-epochs had rotated out of `Sub(asset)`'s own ring, but that made the gate's own footprint (the count of distinct ledger keys one call touches) grow by one key for every unbuilt hour scanned, since even a miss (an hour that was never held) still costs one footprint entry. Removing `HeldHour` from the gate path keeps that footprint flat regardless of how many hours are unbuilt (S5); the gate relies entirely on `Sub(asset)` (inside its own 5 hour span) and `Ring(asset)`'s own provisional roll-up (outside it, S4) instead, and never needs to know whether an hour has ever been held at all.
 - **TTL.** Extended on every write, and on every `post_signals` for the asset, the same target lifetime as `Ring(asset)` (Section 15.2).
 
@@ -1129,7 +1178,7 @@ sequenceDiagram
   Staking-->>Oracle: EndpointStatus
   Oracle->>Oracle: write SignalSet.endpoint and ring slot
 
-  Note over Staking: only inside [epoch_close + probe_grace_secs, + settle_window_secs] (7.5); outside it, settle_probes rejects and the epoch never settles
+  Note over Staking: only inside [epoch_close + probe_grace_secs, + settle_window_secs] (7.5). Outside it, settle_probes rejects and the epoch never settles
   Oracle->>Staking: settle_probes(asset, epoch), once per asset epoch
   Staking->>Treasury: accrue_reward(reporter, ReporterRewards, share) for each reporter matching the aggregate, reporter_reward_per_epoch split equally (7.5, ADR-012)
   Staking->>Staking: reporters disagreeing with a fault_majority_threshold+ majority accrue one fault
@@ -1400,7 +1449,7 @@ stateDiagram-v2
 
 ### 9.4 Buying cover
 
-`buy_cover(buyer, amount, max_rate_bps) -> (filled, premium_paid)`:
+`buy_cover(buyer, amount, max_rate_bps, max_premium) -> (filled, premium_paid)`:
 
 1. `buyer.require_auth()`; `sync_state()`; series must be Open.
 2. Reject if any of these holds (this blocks informed buying, ADR-003):
@@ -1415,7 +1464,7 @@ stateDiagram-v2
    The gate reads the ring buffer once (Section 5.8). Thresholds and windows come from the asset's canonical definitions, which for the kinds a live series covers are exactly the versions it pins (invariant I13); where the asset has no definition of a kind, the Section 23 default for that parameter applies. Because a Depeg requires every present epoch in its window to fail, this guarantees that any depeg window that triggers a payout started after the purchase (Section 8.6 states the exact caveat).
 
    Since v1.5 (Section 5.9, S5): `RecentDepeg` classifies every hour into one of three buckets (no signal, built, unbuilt, S5), NEVER reading `HeldHour`. No signal (before the asset's own history, or `Empty`, never posted or built below coverage) is skipped entirely. A BUILT hour is checked through `Ring(asset)` exactly as today, at its own built, averaged `peg_ratio`. An UNBUILT hour still inside `Sub(asset)`'s own 5 hour span is checked at sub-epoch granularity, through one batched cross-contract call covering every such hour in the window. An UNBUILT hour whose sub-epochs have rotated out of that span is checked through `Ring(asset)`'s own provisional roll-up instead, using `provisional_sub_coverage` (S4) to tell a real roll-up from zero coverage. This way a depeg blocks new cover within one `sub_epoch_secs` of starting, without changing the gate's own sensitivity to how long a single wick stays visible: a wick a built hour's own roll-up (S4) already absorbed into its average can never, by itself, be read back out once that hour builds, since the gate stops reading sub-epochs for a built hour at all. If more hours are unbuilt at once than `MAX_UNBUILT_HOURS_SCANNED_BY_COVER_GATE` allows, `cover_gate` instead returns `UnbuiltBacklog` — a defensive guard that cannot actually be reached while `register_definition` enforces `MAX_DEPEG_WINDOW_EPOCHS` (S5) — blocking the sale the same as any other gate state. `RecentEndpointOutage` and `RecentIssuerAction` are unaffected: endpoint probes stay hourly (Section 5.9, S6), and issuer actions are read from the hourly ring exactly as today.
-3. Since v1.5: reject (`FeedBehind`, Section 5.9, S5; `feat/markets` M1) unless the asset's newest posted sub-epoch is the last one that closed, OR is the one before that and fewer than `feed_grace_secs` (new parameter, default 120 seconds) have passed since the last sub-epoch closed. The grace window accounts for the keeper's own short posting margin after each close (Section 18.1): without it, every sale would be rejected for a few seconds out of every `sub_epoch_secs` simply because the newest post has not landed yet, which at a 5 minute interval is a meaningfully larger fraction of the time than it was at an hour.
+3. Since v1.5: reject (`FeedBehind`, Section 5.9, S5; `feat/markets` M1) unless the asset's newest posted sub-epoch is the last one that closed, OR is the one before that and fewer than `feed_grace_secs` (new parameter, default 120 seconds) have passed since the last sub-epoch closed. The grace window accounts for the keeper's own short posting margin after each close (Section 18.1): without it, every sale would be rejected for a few seconds out of every `sub_epoch_secs` simply because the newest post has not landed yet, which at a 5 minute interval is a meaningfully larger fraction of the time than it was at an hour. Each sub-epoch's close is measured with the length in force for its own hour (`RiskOracle.sub_epoch_secs_at`), so a `sub_epoch_secs` change at an hour boundary does not misplace either side of it.
 4. Since v1.5: if the asset has a `PriceGuard` configured, call `PriceGuard.check(asset)`; reject with `FastSignalPause` unless it returns `Ok` (Section 5.9, S5; `feat/markets` M2). An asset with no `PriceGuard` configured skips this step. `PriceGuard` only ever gates a sale: it is never consulted by `trigger`, `claim`, or any read of an existing position.
 5. Check the series' own caps: series total cover plus `amount` is at most `cap`; buyer's cover plus `amount` is at most `max_cover_per_buyer`. The series never reads the asset wide cap.
 6. If `require_holding`: the USD value of the buyer's issued asset balance must be at least the buyer's resulting cover in USDC:
@@ -1425,10 +1474,12 @@ stateDiagram-v2
    ```
 
    `balance` is read from the asset's SAC, `peg_ratio` is the latest posted value, and `fx_rate` is the reference to USD rate from `RiskOracle.reference_rate(asset)`: `SCALE` for a `Usd` reference, `FxAdapter.rate(code, rate_source)` for a `Fiat` reference. A stale rate fails closed. All factors are fixed point with `SCALE`, rounded down. `open_series` rejects `require_holding` for an asset with an `Asset` reference in v1 (Section 9.7), so that case never reaches this step.
-7. Walk quotes from cheapest; skip any with `rate_bps > max_rate_bps`; fill until `amount` or quotes run out. For each fill, compute the premium (Section 10), add `fill` to the seller's `cover_written` and the premium net of fee to `premium_earned`.
+7. Walk quotes from cheapest; skip any with `rate_bps > max_rate_bps`; fill until `amount` or quotes run out. For each fill, compute the premium (Section 10), add `fill` to the seller's `cover_written` and the premium net of fee to `premium_earned`. Reject (`PremiumAboveMax`) if the total premium is above `max_premium`.
 8. Call `MarketFactory.reserve_cover(series, filled)`. The factory checks `open_cover(asset) + filled <= cover_cap(asset)` and reserves in the same call, or fails with `CoverCapExceeded` and the whole purchase reverts. There is no separate read of the cap, so there is no window between checking and reserving.
-9. Transfer total premium from buyer to the series (USDC); pay the fee part into the `Treasury` with `Treasury.deposit(series, Fees, fee)`; mint `filled` cover units to the buyer.
+9. Transfer `max_premium` from buyer to the series (USDC) and, in the same call, refund `max_premium` minus the total premium to the buyer; pay the fee part into the `Treasury` with `Treasury.deposit(series, Fees, fee)`; mint `filled` cover units to the buyer. The fee, each seller's `premium_earned`, `total_premium` and `cover_bought` all use the real premium, never `max_premium`.
 10. Emit `cover_bought`. Partial fills are allowed; the caller sees `filled < amount`.
+
+Why `max_premium`: the premium depends on `time_remaining` (Section 10.1), so it falls every second. The buyer's signature covers the exact amount of the nested USDC transfer, and a transaction simulated at one timestamp lands at a later one, so signing the live premium would fail authorization on almost every purchase. The buyer instead signs a fixed `max_premium`, typically `premium_quote(amount, max_rate_bps)` at signing time; time alone only lowers the premium, so a later execution charges the same or less and refunds the rest. A premium above `max_premium` (a cheaper quote cancelled in between, say) rejects the purchase instead of charging more.
 
 Call sequence for the steps above, using the two seller example from Section 10.5 (Seller A quotes 400 bps, Seller B quotes 300 bps; buyer walks the book cheapest first):
 
@@ -1443,7 +1494,7 @@ sequenceDiagram
   participant USDC as USDC SAC
   participant Treasury
 
-  Buyer->>Series: buy_cover(amount, max_rate_bps)
+  Buyer->>Series: buy_cover(amount, max_rate_bps, max_premium)
   Series->>Series: require_auth(buyer), sync_state(), check state == Open
   Series->>Oracle: is_stale(asset), band(asset)
   Series->>Registry: cover_gate(asset)
@@ -1469,12 +1520,14 @@ sequenceDiagram
   Series->>Series: walk quotes cheapest first (step 7)
   Note over Series: fills 50,000 from Seller B @ 300 bps, then 30,000 from Seller A @ 400 bps
   Series->>Series: compute premium per fill (10.1), credit each seller's premium_earned net of fee
+  Series->>Series: reject (PremiumAboveMax) if total premium > max_premium (step 7)
 
   Series->>Factory: reserve_cover(series, filled)
   Factory->>Factory: check open_cover + filled <= cover_cap and reserve, one call (step 8)
   Factory-->>Series: ok, or CoverCapExceeded and the whole call reverts
 
-  Buyer->>USDC: transfer total premium to Series
+  Buyer->>USDC: transfer max_premium to Series
+  Series->>USDC: refund max_premium minus total premium to Buyer
   Series->>Treasury: deposit(series, Fees, fee)
   Treasury->>USDC: transfer fee from Series to Treasury
   Series->>Series: mint filled cover units to buyer (step 9)
@@ -1659,6 +1712,7 @@ fn signals(env, asset: Address, epoch: u64) -> Option<SignalSet>;
 fn overturned_signals(env, asset: Address, epoch: u64) -> Option<SignalSet>; // the SignalSet an overturned epoch's posting had before it was moved out of signals(); audit only
 fn latest(env, asset: Address) -> Option<SignalSet>;      // unchanged by v1.5: the newest HOUR's SignalSet; Series' require_holding valuation (Section 9.4) and every existing integration keep reading this exact meaning
 fn live(env, asset: Address) -> Option<(SubEpoch, SignalSet, SlotState)>; // new in v1.5 (5.9, S5): the newest sub-epoch's SignalSet and its state; shown in the app as "Live," next to latest()/score()'s hourly "Confirmed" values. Never used for require_holding or any other payout-adjacent valuation
+fn sub_epoch_secs_at(env, asset: Address, hour: u64) -> u64; // the sub-epoch length in force for `hour` (5.9, S1): the pending value from effective_from_hour on, the current value before it; the same resolver every internal read uses. Series' FeedBehind check (Section 9.4 step 3) measures each boundary with it
 fn ring(env, asset: Address) -> Vec<RingSlot>;             // oldest first, one storage read (Section 5.8)
 fn is_final(env, asset: Address, epoch: u64) -> bool;      // effective finality (ADR-008): Final by stored state, or Pending with now >= pending_until
 fn effective_window(env, asset: Address, start_epoch: u64, count: u32) -> Vec<Option<SlotState>>; // per-epoch effective state over a range, for EventRegistry's Tier 1 checks (8.2)
@@ -1786,7 +1840,7 @@ fn withdraw(env, seller: Address, amount: i128) -> i128;  // auth: seller
 fn transfer_position(env, from: Address, to: Address);    // auth: from; rejects if `to` already holds a position (RecipientHasPosition)
 
 // buyer side
-fn buy_cover(env, buyer: Address, amount: i128, max_rate_bps: u32) -> (i128, i128); // auth: buyer
+fn buy_cover(env, buyer: Address, amount: i128, max_rate_bps: u32, max_premium: i128) -> (i128, i128); // auth: buyer; takes max_premium, refunds the rest
 fn claim(env, holder: Address, amount: i128) -> i128;     // auth: holder
 fn claim_for(env, holder: Address) -> i128;               // anyone, after claim window
 
@@ -1939,6 +1993,9 @@ Each contract defines a `#[contracterror]` enum with `u32` codes in its own rang
 | 113 | `InvalidSubEpochInterval` (v1.5) | RiskOracle | `sub_epoch_secs` set to a value outside {300, 600, 900, 1,200, 1,800, 3,600}, or one that does not divide 3,600 evenly (Section 5.9, S1) |
 | 114 | `SubEpochNotReady` (v1.5) | RiskOracle | An hour-build was requested while at least one of its sub-epochs is still Pending or Disputed, i.e. not yet Final, permanently missing, or rejected (Section 5.9, S4) |
 | 115 | `HourAlreadyPosted` (v1.5) | RiskOracle | A sub-epoch post against an hour already posted through the hourly fallback path, or an hourly fallback post against an hour that already has a sub-epoch posted (Section 5.9, S2) |
+| 116 | `AlreadyMigrated` | RiskOracle | `migrate` called with a `target_version` already applied, or an older one; each storage-shape migration runs at most once (issue #12) |
+| 117 | `SubEpochChangeTooSoon` | RiskOracle | `set_sub_epoch_secs` called fewer than 240 hours after the previous change took effect; a change still pending may be replaced (Section 5.9, S1) |
+| 118 | `RulingDeadlinePassed` | RiskOracle | `resolve_signal_dispute` or `resolve_sub_signal_dispute` called at or after `opened_at + signal_dispute_ruling_secs`; only the timeout can close the dispute from then on (Section 5.9, S2) |
 | 200 | `UnknownDefinition` | EventRegistry | No canonical definition for (asset, kind), or no such version |
 | 201 | `EventInProgress` | EventRegistry | Another event is open for this (asset, kind) |
 | 202 | `Tier1CheckFailed` | EventRegistry | Ring buffer data does not meet the definition, including too many missing epochs or a low baseline liquidity |
@@ -1997,6 +2054,8 @@ Each contract defines a `#[contracterror]` enum with `u32` codes in its own rang
 | 514 | `RecentFailureSignals` | Series | Cover gate failed: recent below threshold epoch, endpoint outage, or issuer action |
 | 515 | `RecipientHasPosition` | Series | `transfer_position` to an address that already holds a position |
 | 516 | `FastSignalPause` (v1.5) | Series | `buy_cover` rejected: the asset's `PriceGuard` reports `Paused` or `Unavailable` (Section 5.9, S5; `feat/markets` M2). Sales only; never blocks a claim or a trigger |
+| 517 | `FeedBehind` (v1.5) | Series | `buy_cover` rejected: the asset's newest posted sub-epoch is older than the last closed one, outside `feed_grace_secs` (Section 9.4 step 3; `feat/markets` M1) |
+| 518 | `PremiumAboveMax` | Series | `buy_cover`: the premium at execution is above the buyer's signed `max_premium` (Section 9.4) |
 | 600 | `NotSigner` | Governor | Not a multisig signer |
 | 601 | `TimelockActive` | Governor | Execute before ETA |
 | 602 | `ThresholdNotMet` | Governor | Not enough approvals |
@@ -2028,6 +2087,7 @@ Soroban storage has three classes with different lifetimes and costs: instance (
 | RiskOracle | `Dispute(asset, epoch)` | persistent | Dispute record: disputer, alt hash, and `opened_at` (ADR-010, the ruling deadline's own clock, distinct from the posting's `pending_until`); the bond is in `Staking` |
 | RiskOracle | `CommitteeMisses(committee)` | persistent | Signal dispute ruling deadlines that committee let pass without a ruling (ADR-010); no public read yet (Section 12.1, 24.2) |
 | RiskOracle | `SubEpochConfig(asset)` (v1.5) | persistent | `(sub_epoch_secs, pending_sub_epoch_secs, effective_from_hour)`, Section 5.9 S1 |
+| RiskOracle | `HourSubEpochSecs(asset, hour)` | persistent | The `sub_epoch_secs` an hour's sub-epochs were posted at, recorded by its first sub-epoch post and read by every later resolution of that hour, Section 5.9 S1 |
 | RiskOracle | `Sub(asset)` (v1.5) | persistent | Packed ring of the newest sub-epochs, fixed at 60 slots (6,729 bytes) spanning a fixed 5 hour grid regardless of `sub_epoch_secs` (Section 5.9 S3, S4); each slot's own identity is its `sub_start` timestamp, not `(hour, sub)`; same packed encoding as `Ring(asset)` |
 | RiskOracle | `SubDispute(asset, hour, sub)` (v1.5) | persistent | A disputed sub-epoch's record, copied out of `Sub(asset)` the moment it is disputed (Section 5.9, S3), mirroring `Overturned(asset, epoch)`'s own move-out-of-the-ring pattern |
 | RiskOracle | `HeldHour(asset, hour)` (v1.5) | persistent | `hour`'s own sub-epoch roll-up data (`Map<sub, ...>`, at most 12 entries), copied out of `Sub(asset)` the moment any of the hour's sub-epochs is disputed, so a ruling arriving after the ring has rotated past the hour's entire footprint still has every other sub-epoch's data to build from (Section 5.9, S3); cleared once the hour builds. Read by the build and dispute paths only; `EventRegistry.cover_gate` never reads it, keeping the gate's own footprint independent of how many hours are ever held (Section 5.9, S5) |
@@ -2069,19 +2129,29 @@ Funds sit only where the "Holds funds?" column of Section 3.1 says: `Series` (co
 | --- | --- | --- |
 | Contract instance and code | Indefinite | Every call; plus an ops job (Section 22) |
 | Asset config, score, ring buffer | Indefinite while asset is enabled | Every `post_signals` |
-| Individual `Signals(asset, epoch)` | 30 days | On write; history beyond that lives in the indexer and the inputs bundles |
+| Individual `Signals(asset, epoch)` | 10 days (deviation 1 below) | On write; history beyond that lives in the indexer and the inputs bundles |
+| `HourPostedVia(asset, hour)` (v1.5) | 10 days | On write (re-extended on a later write only below 8 days left) |
+| `HourSubEpochSecs(asset, hour)` | 10 days | Written once, at the hour's first sub-epoch post; history beyond that is restorable on demand |
+| `SubSignals(asset, hour, sub)` (v1.5) | 10 days | On write, and again when a sibling sub-epoch of the same hour is overturned (deviation 2 below); history beyond that lives in the indexer and the inputs bundles |
+| Overturn and repost records: `Overturned(asset, epoch)`, `SubOverturned(asset, hour, sub)`, `SubRepostUsed(asset, hour, sub)` | 10 days | On write |
 | Definitions, canonical pointers, event status | Indefinite while the asset is enabled | Every touch; ops job |
 | Event records (`EventRegistry`) and bonds (`Staking`) | 1 year after resolution | Every touch; ops job |
 | Keeper and reporter records, claimable balances (`Staking`), accrued rewards (`Treasury`) | Until withdrawn or claimed, minimum 1 year after the last change | Every touch; ops job |
 | Series positions and cover balances | Until withdrawn or claimed, minimum 1 year after expiry | Every touch; anyone can call `extend(holder)` |
 | Probe reports, probe settlement markers | 7 days | None (temporary) |
 | `Sub(asset)`, `SubDispute(asset, hour, sub)` (v1.5) | Indefinite while the asset is enabled, same as `Ring(asset)` | Every write; every `post_signals` for the asset |
+| `HeldHour(asset, hour)` (v1.5) | One day past the hour's last open `SubDispute` | Every write; cleared once the hour builds (Section 5.9, S3) |
 | `Series`, `MarketFactory` persistent entries (M4, v1.5) | Until withdrawn or claimed, minimum 1 year, same target as `Series` positions above | Every write, and every hot-path read (M4) |
 | `Series`, `MarketFactory` instance (M4, v1.5) | Indefinite | Every state-changing call |
 
 A claimant whose balance entry was archived can restore it with a standard restore footprint transaction before claiming. The SDK does this automatically when simulation reports an archived entry.
 
-This table's own "Extended by: every `post_signals`" claim for `RiskOracle`'s asset config, score and ring buffer describes the intended policy, not what the deployed contract does today: `RiskOracle` (like `Treasury` and `EventRegistry`) calls `extend_ttl` nowhere in its storage layer as built. Tracked separately as issue #28 (known-gap), unrelated to this revision.
+The live testnet contracts get this policy through `upgrade()` (issue #12); the `deploy/extend-ttl.sh` cron stays until then.
+
+Deviations from the original 30-day history lifetime (issue #28):
+
+1. `Signals` and every other history key above get 10 days, not 30. 10 days is the ring's own span (240 hourly slots), and it covers the longest live need of a single dispute (the 2 hour dispute window plus the 6 day ruling) with almost 4 days of margin. `SubSignals` are written up to 288 times a day per asset, so 30 days of prepaid rent on each was too much.
+2. `SubSignals` entries are re-extended when a sibling sub-epoch is overturned, covering the two-dispute-cycle worst case. That case (about 12.3 days, or 13.2 with a late timeout, Section 5.9 S2) becomes reachable only once held reposts can be disputed; today a repost that lands in `HeldHour` can't be, which caps the wait at about 7.2 days.
 
 ### 15.3 Size limits
 
@@ -2677,7 +2747,8 @@ Every tunable value in one place, with its v1 default. All defaults are starting
 | `signal_dispute_secs` | 7,200 (2h) | seconds | Signal dispute window; unchanged, applies identically to a sub-epoch posting since v1.5 (Section 5.9, S2) |
 | `signal_dispute_bond` | 1,000 | USDC | Signal disputes |
 | `signal_dispute_ruling_secs` | 518,400 (6d) | seconds from the dispute | ADR-010: deadline for the committee to rule on a signal dispute before `resolve_signal_dispute_timeout` applies the default outcome. Lowered from 7 days (finding F1): the worst-case dispute timeline must resolve before the ring wraps around, and 7 days no longer fit once measured precisely against `RING_SLOTS * EPOCH_SECS` |
-| `stale_after_epochs` | 3 | epochs | Staleness |
+| `stale_after_epochs` | 3 | epochs | Staleness: gates `is_stale` only (Section 5.5) |
+| `score_stale_after_epochs` (v1.5) | 5 | epochs | Staleness: gates `score().stale`/`check_stale` only, sized for a sub-epoch-built hour's own finality lag (Section 5.5, 5.9) |
 | `amm_tolerance_bps` | 300 | bps | AMM cross check |
 | `keeper_bond` | 5,000 | USDC | Keepers |
 | `keeper_slash` | 1,000 | USDC | Lost disputes |

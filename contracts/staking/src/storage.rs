@@ -77,9 +77,7 @@ pub fn get_keeper(env: &Env, keeper: &Address) -> Option<KeeperInfo> {
 }
 
 pub fn set_keeper(env: &Env, keeper: &Address, info: &KeeperInfo) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Keeper(keeper.clone()), info);
+    sylox_types::ttl::set_persistent(env, &DataKey::Keeper(keeper.clone()), info);
 }
 
 pub fn get_reporter(env: &Env, reporter: &Address) -> Option<ReporterInfo> {
@@ -89,9 +87,7 @@ pub fn get_reporter(env: &Env, reporter: &Address) -> Option<ReporterInfo> {
 }
 
 pub fn set_reporter(env: &Env, reporter: &Address, info: &ReporterInfo) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Reporter(reporter.clone()), info);
+    sylox_types::ttl::set_persistent(env, &DataKey::Reporter(reporter.clone()), info);
 }
 
 pub fn get_all_reporters(env: &Env) -> Vec<Address> {
@@ -192,9 +188,7 @@ pub fn get_bond(env: &Env, key: &BondKey) -> Option<BondRecord> {
 }
 
 pub fn set_bond(env: &Env, key: &BondKey, record: &BondRecord) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Bond(key.clone()), record);
+    sylox_types::ttl::set_persistent(env, &DataKey::Bond(key.clone()), record);
 }
 
 pub fn clear_bond(env: &Env, key: &BondKey) {
@@ -212,9 +206,7 @@ pub fn get_claimable(env: &Env, who: &Address) -> i128 {
 
 pub fn add_claimable(env: &Env, who: &Address, amount: i128) {
     let current = get_claimable(env, who);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Claimable(who.clone()), &(current + amount));
+    sylox_types::ttl::set_persistent(env, &DataKey::Claimable(who.clone()), &(current + amount));
 }
 
 pub fn clear_claimable(env: &Env, who: &Address) {

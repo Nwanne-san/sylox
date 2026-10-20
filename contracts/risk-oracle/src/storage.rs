@@ -195,6 +195,11 @@ pub enum DataKey {
     /// after `Sub(asset)`'s own 60 slot ring has rotated the hour's
     /// sub-epochs out.
     HourPostedVia(Address, u64),
+    /// Section 5.9 S1: the `sub_epoch_secs` an hour's sub-epochs were
+    /// posted at, recorded by its first sub-epoch post. A new key rather
+    /// than a field on an existing entry, so every entry the live
+    /// contract already holds still decodes after an upgrade.
+    HourSubEpochSecs(Address, u64),
 }
 
 /// Section 5.9 S2: which path posted an hour, for the one-writer-per-hour
@@ -235,9 +240,7 @@ pub fn get_committee_misses(env: &Env, committee: &Address) -> u32 {
 
 pub fn record_committee_miss(env: &Env, committee: &Address) {
     let count = get_committee_misses(env, committee) + 1;
-    env.storage()
-        .persistent()
-        .set(&DataKey::CommitteeMisses(committee.clone()), &count);
+    sylox_types::ttl::set_persistent(env, &DataKey::CommitteeMisses(committee.clone()), &count);
 }
 
 pub fn get_asset_config(env: &Env, asset: &Address) -> Option<AssetConfig> {
@@ -247,9 +250,7 @@ pub fn get_asset_config(env: &Env, asset: &Address) -> Option<AssetConfig> {
 }
 
 pub fn set_asset_config(env: &Env, asset: &Address, cfg: &AssetConfig) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Asset(asset.clone()), cfg);
+    sylox_types::ttl::set_persistent(env, &DataKey::Asset(asset.clone()), cfg);
 }
 
 pub fn get_signals(env: &Env, asset: &Address, epoch: u64) -> Option<SignalSet> {
@@ -259,9 +260,7 @@ pub fn get_signals(env: &Env, asset: &Address, epoch: u64) -> Option<SignalSet> 
 }
 
 pub fn set_signals(env: &Env, asset: &Address, epoch: u64, signals: &SignalSet) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Signals(asset.clone(), epoch), signals);
+    sylox_types::ttl::set_history(env, &DataKey::Signals(asset.clone(), epoch), signals);
 }
 
 /// Review item C4: moves `Signals(asset, epoch)` to the `Overturned`
@@ -273,9 +272,7 @@ pub fn set_signals(env: &Env, asset: &Address, epoch: u64, signals: &SignalSet) 
 pub fn overturn_signals(env: &Env, asset: &Address, epoch: u64) {
     let key = DataKey::Signals(asset.clone(), epoch);
     if let Some(signals) = env.storage().persistent().get::<_, SignalSet>(&key) {
-        env.storage()
-            .persistent()
-            .set(&DataKey::Overturned(asset.clone(), epoch), &signals);
+        sylox_types::ttl::set_history(env, &DataKey::Overturned(asset.clone(), epoch), &signals);
         env.storage().persistent().remove(&key);
     }
 }
@@ -459,9 +456,7 @@ pub fn get_first_epoch(env: &Env, asset: &Address) -> Option<u64> {
 /// idempotent on every call after the first.
 pub fn set_first_epoch_if_unset(env: &Env, asset: &Address, epoch: u64) {
     if get_first_epoch(env, asset).is_none() {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FirstEpoch(asset.clone()), &epoch);
+        sylox_types::ttl::set_persistent(env, &DataKey::FirstEpoch(asset.clone()), &epoch);
     }
 }
 
@@ -475,9 +470,7 @@ pub fn get_newest_final(env: &Env, asset: &Address) -> Option<u64> {
 }
 
 pub fn set_newest_final(env: &Env, asset: &Address, epoch: u64) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::NewestFinal(asset.clone()), &epoch);
+    sylox_types::ttl::set_persistent(env, &DataKey::NewestFinal(asset.clone()), &epoch);
 }
 
 /// Writes `signals` for `epoch` into its ring slot at `position_of(epoch)`
@@ -526,15 +519,11 @@ pub fn write_ring_slot(
     // also start unannounced rather than inheriting whatever the
     // overturned attempt's flag happened to be.
     write_slot(&mut packed, index, &slot, false);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Ring(asset.clone()), &packed);
+    sylox_types::ttl::set_persistent(env, &DataKey::Ring(asset.clone()), &packed);
 
     let newest = get_newest_epoch(env, asset);
     if newest.is_none_or(|n| epoch > n) {
-        env.storage()
-            .persistent()
-            .set(&DataKey::RingNewest(asset.clone()), &epoch);
+        sylox_types::ttl::set_persistent(env, &DataKey::RingNewest(asset.clone()), &epoch);
     }
     true
 }
@@ -548,9 +537,7 @@ pub fn get_score(env: &Env, asset: &Address) -> Option<RiskScore> {
 }
 
 pub fn set_score(env: &Env, asset: &Address, score: &RiskScore) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Score(asset.clone()), score);
+    sylox_types::ttl::set_persistent(env, &DataKey::Score(asset.clone()), score);
 }
 
 /// Review decision D1.
@@ -564,9 +551,7 @@ pub fn get_event_in_progress(env: &Env, asset: &Address) -> bool {
 /// Review decision D1.
 pub fn set_event_in_progress(env: &Env, asset: &Address, in_progress: bool) {
     if in_progress {
-        env.storage()
-            .persistent()
-            .set(&DataKey::EventInProgress(asset.clone()), &true);
+        sylox_types::ttl::set_persistent(env, &DataKey::EventInProgress(asset.clone()), &true);
     } else {
         env.storage()
             .persistent()
@@ -585,9 +570,7 @@ pub fn get_stale_announced(env: &Env, asset: &Address) -> bool {
 /// Re-review item C7.
 pub fn set_stale_announced(env: &Env, asset: &Address, announced: bool) {
     if announced {
-        env.storage()
-            .persistent()
-            .set(&DataKey::StaleAnnounced(asset.clone()), &true);
+        sylox_types::ttl::set_persistent(env, &DataKey::StaleAnnounced(asset.clone()), &true);
     } else {
         env.storage()
             .persistent()
@@ -608,9 +591,7 @@ pub fn set_down_streak(env: &Env, asset: &Address, streak: u32) {
             .persistent()
             .remove(&DataKey::DownStreak(asset.clone()));
     } else {
-        env.storage()
-            .persistent()
-            .set(&DataKey::DownStreak(asset.clone()), &streak);
+        sylox_types::ttl::set_persistent(env, &DataKey::DownStreak(asset.clone()), &streak);
     }
 }
 
@@ -650,9 +631,7 @@ pub fn get_dispute(env: &Env, asset: &Address, epoch: u64) -> Option<DisputeReco
 }
 
 pub fn set_dispute(env: &Env, asset: &Address, epoch: u64, record: &DisputeRecord) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Dispute(asset.clone(), epoch), record);
+    sylox_types::ttl::set_persistent(env, &DataKey::Dispute(asset.clone(), epoch), record);
 }
 
 pub fn clear_dispute(env: &Env, asset: &Address, epoch: u64) {
@@ -679,9 +658,7 @@ pub fn set_slot_disputed(env: &Env, asset: &Address, epoch: u64) {
     let final_announced = read_final_announced(&packed, index);
     slot.state = SlotState::Disputed;
     write_slot(&mut packed, index, &slot, final_announced);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Ring(asset.clone()), &packed);
+    sylox_types::ttl::set_persistent(env, &DataKey::Ring(asset.clone()), &packed);
 }
 
 /// Section 5.9 S4 (v1.5): unlike `set_slot_disputed`, writes `Disputed`
@@ -740,15 +717,11 @@ pub fn force_set_slot_disputed(
         provisional_sub_coverage,
     };
     write_slot(&mut packed, index, &slot, false);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Ring(asset.clone()), &packed);
+    sylox_types::ttl::set_persistent(env, &DataKey::Ring(asset.clone()), &packed);
 
     let newest = get_newest_epoch(env, asset);
     if newest.is_none_or(|n| epoch > n) {
-        env.storage()
-            .persistent()
-            .set(&DataKey::RingNewest(asset.clone()), &epoch);
+        sylox_types::ttl::set_persistent(env, &DataKey::RingNewest(asset.clone()), &epoch);
     }
     true
 }
@@ -774,9 +747,7 @@ pub fn set_slot_final(env: &Env, asset: &Address, epoch: u64) -> bool {
     }
     slot.state = SlotState::Final;
     write_slot(&mut packed, index, &slot, true);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Ring(asset.clone()), &packed);
+    sylox_types::ttl::set_persistent(env, &DataKey::Ring(asset.clone()), &packed);
     true
 }
 
@@ -794,9 +765,7 @@ pub fn set_slot_overturned(env: &Env, asset: &Address, epoch: u64) {
         return;
     }
     write_slot(&mut packed, index, &empty_slot(), false);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Ring(asset.clone()), &packed);
+    sylox_types::ttl::set_persistent(env, &DataKey::Ring(asset.clone()), &packed);
 }
 
 /// Updates a slot's `endpoint` in place, for `finalize_endpoint` (Section
@@ -813,9 +782,7 @@ pub fn set_slot_endpoint(env: &Env, asset: &Address, epoch: u64, endpoint: Endpo
     let final_announced = read_final_announced(&packed, index);
     slot.endpoint = endpoint;
     write_slot(&mut packed, index, &slot, final_announced);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Ring(asset.clone()), &packed);
+    sylox_types::ttl::set_persistent(env, &DataKey::Ring(asset.clone()), &packed);
 }
 
 /// `epoch`'s position in the ring. A position, not an identity: see the
@@ -1115,9 +1082,7 @@ pub fn advance_finality(
     }
 
     if changed {
-        env.storage()
-            .persistent()
-            .set(&DataKey::Ring(asset.clone()), &packed);
+        sylox_types::ttl::set_persistent(env, &DataKey::Ring(asset.clone()), &packed);
     }
 
     (newest_final, newly_announced)
@@ -1414,9 +1379,7 @@ pub fn write_sub_slot_entry(
 
     let newest = get_sub_ring_newest(env, asset);
     if newest.is_none_or(|n| sub_start > n) {
-        env.storage()
-            .persistent()
-            .set(&DataKey::SubRingNewest(asset.clone()), &sub_start);
+        sylox_types::ttl::set_persistent(env, &DataKey::SubRingNewest(asset.clone()), &sub_start);
     }
     true
 }
@@ -1495,9 +1458,7 @@ pub fn get_sub_signals(env: &Env, asset: &Address, hour: u64, sub: u32) -> Optio
 }
 
 pub fn set_sub_signals(env: &Env, asset: &Address, hour: u64, sub: u32, signals: &SignalSet) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::SubSignals(asset.clone(), hour, sub), signals);
+    sylox_types::ttl::set_history(env, &DataKey::SubSignals(asset.clone(), hour, sub), signals);
 }
 
 /// Section 5.9 S2 (v1.5, footprint-fix revision): one overturned
@@ -1537,7 +1498,14 @@ pub struct SubOverturnedRecord {
 /// there was no `SubSignals` entry for this sub-epoch (defensive;
 /// `resolve_sub_signal_dispute`'s caller already checked one exists
 /// before calling this).
-pub fn overturn_sub_signals(env: &Env, asset: &Address, hour: u64, sub: u32, now: u64) {
+pub fn overturn_sub_signals(
+    env: &Env,
+    asset: &Address,
+    hour: u64,
+    sub: u32,
+    per_hour: u32,
+    now: u64,
+) {
     let key = DataKey::SubSignals(asset.clone(), hour, sub);
     if let Some(signals) = env.storage().persistent().get::<_, SignalSet>(&key) {
         let repost_used_key = DataKey::SubRepostUsed(asset.clone(), hour, sub);
@@ -1549,7 +1517,8 @@ pub fn overturn_sub_signals(env: &Env, asset: &Address, hour: u64, sub: u32, now
         // otherwise would be.
         let already_used_its_repost = env.storage().persistent().has(&repost_used_key);
         env.storage().persistent().remove(&repost_used_key);
-        env.storage().persistent().set(
+        sylox_types::ttl::set_history(
+            env,
             &DataKey::SubOverturned(asset.clone(), hour, sub),
             &SubOverturnedRecord {
                 signals,
@@ -1558,6 +1527,26 @@ pub fn overturn_sub_signals(env: &Env, asset: &Address, hour: u64, sub: u32, now
             },
         );
         env.storage().persistent().remove(&key);
+
+        // The hour can't build until the repost's own dispute cycle
+        // ends: about 12.3 days after the first post, or about 13.2
+        // with a late timeout (Section 5.9 S2). The build then reads
+        // every sub-epoch in the hour through `hash_sub_epoch_inputs`
+        // and `reward_sub_epoch_keepers`, so the siblings written at
+        // the first post must outlive their own 10 days. Today a held
+        // repost can't be disputed, which caps the wait at about 7.2
+        // days; this keeps the hour whole once that changes.
+        let storage = env.storage().persistent();
+        for sibling in 0..per_hour {
+            let sibling_key = DataKey::SubSignals(asset.clone(), hour, sibling);
+            if sibling != sub && storage.has(&sibling_key) {
+                storage.extend_ttl(
+                    &sibling_key,
+                    sylox_types::ttl::HISTORY_TTL_THRESHOLD,
+                    sylox_types::ttl::HISTORY_TTL_EXTEND_TO,
+                );
+            }
+        }
     }
 }
 
@@ -1595,15 +1584,17 @@ pub fn mark_sub_overturn_reposted(env: &Env, asset: &Address, hour: u64, sub: u3
         .get::<_, SubOverturnedRecord>(&key)
     {
         record.reposted = true;
-        env.storage().persistent().set(&key, &record);
+        sylox_types::ttl::set_history(env, &key, &record);
     }
     // Tags the just-accepted repost itself, so IF it is later
     // overturned too, that overturn's own fresh record starts
     // already `reposted: true` (see `overturn_sub_signals`): the one
     // repost per original overturn rule.
-    env.storage()
-        .persistent()
-        .set(&DataKey::SubRepostUsed(asset.clone(), hour, sub), &true);
+    sylox_types::ttl::set_history(
+        env,
+        &DataKey::SubRepostUsed(asset.clone(), hour, sub),
+        &true,
+    );
 }
 
 // -- sub-epoch config (Section 5.9 S1) --
@@ -1615,9 +1606,7 @@ pub fn get_sub_epoch_config(env: &Env, asset: &Address) -> Option<sylox_types::S
 }
 
 pub fn set_sub_epoch_config(env: &Env, asset: &Address, cfg: &sylox_types::SubEpochConfig) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::SubEpochConfig(asset.clone()), cfg);
+    sylox_types::ttl::set_persistent(env, &DataKey::SubEpochConfig(asset.clone()), cfg);
 }
 
 // -- sub-epoch disputes (Section 5.9 S3, S4) --
@@ -1787,9 +1776,17 @@ pub fn get_hour_posted_via(env: &Env, asset: &Address, hour: u64) -> Option<Hour
 }
 
 pub fn set_hour_posted_via(env: &Env, asset: &Address, hour: u64, via: HourPostedVia) {
+    sylox_types::ttl::set_history(env, &DataKey::HourPostedVia(asset.clone(), hour), &via);
+}
+
+pub fn get_hour_sub_epoch_secs(env: &Env, asset: &Address, hour: u64) -> Option<u64> {
     env.storage()
         .persistent()
-        .set(&DataKey::HourPostedVia(asset.clone(), hour), &via);
+        .get(&DataKey::HourSubEpochSecs(asset.clone(), hour))
+}
+
+pub fn set_hour_sub_epoch_secs(env: &Env, asset: &Address, hour: u64, secs: u64) {
+    sylox_types::ttl::set_history(env, &DataKey::HourSubEpochSecs(asset.clone(), hour), &secs);
 }
 
 /// Test only: flips the stored layout version so the next read is

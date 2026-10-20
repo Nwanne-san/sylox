@@ -12,6 +12,17 @@ const WIDTH = 960;
 const HEIGHT = 220;
 const PAD_X = 8;
 const PAD_Y = 16;
+// The non-confirmed band sits in its own reserved strip at the TOP of
+// the chart, never anywhere near the value axis below it - this is the
+// fix for the bug where 113 provisional hours, each drawn as a small
+// circle at a fixed low y, visually merged into what read as a flat
+// bar sitting under the depeg threshold line (a viewer's first read:
+// "the price crashed to zero"). A muted band up here can never be
+// mistaken for a plotted value, because it never shares the value
+// axis's coordinate space at all.
+const BAND_HEIGHT = 14;
+const BAND_GAP = 6; // Visual breathing room between the band and the value plot below it.
+const PLOT_TOP = BAND_HEIGHT + BAND_GAP;
 
 function formatAxisDate(timestampSecs: number): string {
   const date = new Date(timestampSecs * 1000);
@@ -105,9 +116,14 @@ export function PegHistoryChart({ points, depegThreshold }: PegHistoryChartProps
     return PAD_X + ((timestamp - minTimestamp) / timeSpan) * (WIDTH - PAD_X * 2);
   }
 
+  // Plots within [PLOT_TOP, HEIGHT - PAD_Y] - never the full [0, HEIGHT]
+  // range, so a real value can never be drawn inside the reserved band
+  // strip at the very top, keeping the two regions visually (and
+  // coordinate-wise) separate.
   function y(value: number): number {
     const t = (value - (minValue - valuePad)) / (valueSpan + valuePad * 2);
-    return HEIGHT - PAD_Y - t * (HEIGHT - PAD_Y * 2);
+    const plotHeight = HEIGHT - PAD_Y - PLOT_TOP;
+    return HEIGHT - PAD_Y - t * plotHeight;
   }
 
   // Build one <path> per contiguous run of known, TRACKED points. A run
@@ -151,16 +167,26 @@ export function PegHistoryChart({ points, depegThreshold }: PegHistoryChartProps
 
   const thresholdY = depegThreshold !== null ? y(depegThreshold) : null;
 
-  // Final hours stay exactly as drawn above (the line segments). A
-  // provisional hour (sub-epoch posting path, dispute not yet resolved)
-  // has pegRatio null like any other not-yet-Final hour - there's no
-  // line to attach a marker to, so it gets its own small tick at the
-  // bottom of the chart with a native SVG tooltip (no existing
-  // hover/tooltip infrastructure here to extend; <title> is the
-  // smallest correct way to attach one).
-  const provisionalPoints = trackedPoints.filter(
+  // One hour's width in chart pixels - every point is spaced EPOCH_SECS
+  // apart on the real time axis (fetchPegHistory in lib/asset-data.ts),
+  // so this is the same for every point; a small overlap (1.2x) keeps
+  // adjacent band cells touching with no visible seam between them.
+  const hourWidthPx =
+    trackedPoints.length > 1
+      ? ((WIDTH - PAD_X * 2) / timeSpan) * (trackedPoints[1].timestamp - trackedPoints[0].timestamp) * 1.2
+      : WIDTH - PAD_X * 2;
+
+  // Final hours stay exactly as drawn above (the line segments). Every
+  // other TRACKED hour - provisional (Pending/Disputed, still on the
+  // sub-epoch path) or genuinely missing (Empty) - gets its own small
+  // cell in the reserved band strip at the top instead of anything
+  // drawn in the value-plotting area below: there's no real value to
+  // plot for any of them, and the band keeps that fact visually
+  // unmistakable rather than letting it read as a value near zero.
+  const provisionalCells = trackedPoints.filter(
     (p): p is PegHistoryPoint & { provisionalSubCoverage: number } => p.provisionalSubCoverage !== null,
   );
+  const missingCells = trackedPoints.filter((p) => p.state === "Empty");
 
   return (
     <div>
@@ -215,6 +241,37 @@ export function PegHistoryChart({ points, depegThreshold }: PegHistoryChartProps
             strokeDasharray="4 4"
           />
         )}
+        {/* The non-confirmed band itself: a dedicated strip at the very
+            top (y=0 to BAND_HEIGHT), entirely outside the value-plotting
+            coordinate range y() ever returns - see PLOT_TOP. Missing
+            (Empty) cells get a plain muted fill; pending/disputed cells
+            get the hatch pattern, so the two are visually distinct from
+            each other as well as from a real value. */}
+        {missingCells.map((p) => (
+          <rect
+            key={`missing-${p.timestamp}`}
+            x={x(p.timestamp) - hourWidthPx / 2}
+            y={0}
+            width={hourWidthPx}
+            height={BAND_HEIGHT}
+            fill="var(--color-cement-grey)"
+            fillOpacity={0.35}
+          >
+            <title>Missing. No signal posted for this hour.</title>
+          </rect>
+        ))}
+        {provisionalCells.map((p) => (
+          <rect
+            key={`provisional-${p.timestamp}`}
+            x={x(p.timestamp) - hourWidthPx / 2}
+            y={0}
+            width={hourWidthPx}
+            height={BAND_HEIGHT}
+            fill="url(#peg-history-pending-hatch)"
+          >
+            <title>{provisionalTooltip(p.state, p.provisionalSubCoverage)}</title>
+          </rect>
+        ))}
         {segments.map((d, i) => (
           <path
             key={i}
@@ -224,17 +281,20 @@ export function PegHistoryChart({ points, depegThreshold }: PegHistoryChartProps
             strokeWidth={1.5}
           />
         ))}
-        {provisionalPoints.map((p) => (
-          <circle
-            key={p.timestamp}
-            cx={x(p.timestamp)}
-            cy={HEIGHT - PAD_Y}
-            r={3}
-            fill="var(--color-cyber-tin)"
-          >
-            <title>{provisionalTooltip(p.state, p.provisionalSubCoverage)}</title>
-          </circle>
-        ))}
+        {/* Defs placed last (SVG allows a <pattern> to be referenced from
+            anywhere in the document, regardless of where <defs> itself
+            sits) - deliberately not first, so it doesn't shift which
+            element container.querySelector("rect") finds first in tests
+            that assert on the untracked band's own rect. */}
+        <defs>
+          {/* Diagonal hatch for pending/disputed cells - a texture, not
+              a solid fill, so the band reads as "incomplete data" at a
+              glance rather than as a plotted value of any kind. */}
+          <pattern id="peg-history-pending-hatch" width={4} height={4} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width={4} height={4} fill="var(--color-cyber-tin)" fillOpacity={0.18} />
+            <line x1={0} y1={0} x2={0} y2={4} stroke="var(--color-cyber-tin)" strokeWidth={1.5} />
+          </pattern>
+        </defs>
       </svg>
 
       <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-cyber-tin/70">
@@ -252,6 +312,25 @@ export function PegHistoryChart({ points, depegThreshold }: PegHistoryChartProps
         <span className="whitespace-nowrap">
           {confirmedCount} confirmed · {pendingCount} pending · {missingCount} missing
         </span>
+        {pendingCount > 0 && (
+          <span className="flex items-center gap-1.5 whitespace-nowrap">
+            <span
+              className="inline-block h-2.5 w-2.5 shrink-0 rounded-[1px]"
+              style={{
+                backgroundImage:
+                  "repeating-linear-gradient(45deg, var(--color-cyber-tin) 0, var(--color-cyber-tin) 1px, transparent 1px, transparent 4px)",
+                backgroundColor: "color-mix(in srgb, var(--color-cyber-tin) 18%, transparent)",
+              }}
+            />
+            pending/disputed hour, no confirmed value yet
+          </span>
+        )}
+        {missingCount > 0 && (
+          <span className="flex items-center gap-1.5 whitespace-nowrap">
+            <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-[1px] bg-cement-grey/35" />
+            missing hour, no signal posted
+          </span>
+        )}
         {depegThreshold !== null && (
           <span className="flex items-center gap-1.5 whitespace-nowrap text-risk-crimson-tint">
             <span className="inline-block h-px w-3 shrink-0 border-t border-dashed border-risk-crimson" />

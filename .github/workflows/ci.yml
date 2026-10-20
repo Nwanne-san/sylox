@@ -60,6 +60,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash deploy/test-extend-ttl-jq.sh
 
+  post-demo-signals-build-recent-hours-test:
+    name: deploy/post-demo-signals.sh candidate_build_hours regression test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash deploy/test-post-demo-signals-build-recent-hours.sh
+
   demo-asset-trigger-parse-i128-test:
     name: deploy/demo-asset-trigger.sh parse_i128 regression test
     runs-on: ubuntu-latest
@@ -101,6 +108,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash deploy/test-demo-asset-trigger-one-gate-per-step.sh
+
+  seed-epoch-test:
+    name: deploy.sh testnet-demo compute_seed_epoch margin regression test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash deploy/test-seed-epoch.sh
 
   test:
     name: cargo test --workspace
@@ -158,6 +172,62 @@ jobs:
             fi
           done
           exit $status
+
+  demo-time-not-in-release:
+    name: demo-time feature not in the real release wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch, 2026-10-08
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install stellar-cli
+        run: |
+          curl -sSfL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            -o stellar-cli.tar.gz
+          echo "${STELLAR_CLI_SHA256}  stellar-cli.tar.gz" | sha256sum -c -
+          tar -xzf stellar-cli.tar.gz
+          sudo mv stellar /usr/local/bin/stellar
+          rm stellar-cli.tar.gz
+          stellar --version
+      # The same build deploy/deploy.sh testnet runs: no --features,
+      # so this is genuinely the artifact that ships, not a stand-in
+      # for it. demo_build_is_false_in_the_real_release_wasm
+      # (contracts/risk-oracle/src/test/release_wasm.rs) is #[ignore]d
+      # so a normal `cargo test` never touches this file; this job is
+      # the one place that builds it first, then runs that test
+      # explicitly with --ignored against the real binary.
+      - name: Build RiskOracle (real release, no demo-time)
+        run: stellar contract build --package risk-oracle
+      - name: Prove demo_build() is false in that exact wasm
+        run: cargo test -p risk-oracle --lib -- --ignored release_wasm
+
+  demo-time-build:
+    name: demo-time feature (per package, not the general test suite)
+    runs-on: ubuntu-latest
+    # The general test suite (the `test` job above) checks real-world
+    # timing on purpose and is never meant to run under demo-time: its
+    # fixtures hardcode real EPOCH_SECS/SUB_EPOCH_GRID_SECS values and
+    # fail by design once those are scaled. This job instead checks the
+    # two things that actually matter for a demo deployment: every
+    # contract deploy/deploy.sh testnet-demo builds and deploys still
+    # compiles with the feature on, and the handful of tests written
+    # specifically for demo-time (not incidentally run under it) still
+    # pass. The two adapter crates are left out: deploy/deploy.sh
+    # testnet-demo never builds or deploys them.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch, 2026-10-08
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build every contract the demo deploys, with demo-time on
+        run: |
+          for crate in risk-oracle staking treasury event-registry market-factory series; do
+            echo "cargo build -p $crate --features demo-time"
+            cargo build -p "$crate" --features demo-time
+          done
+      - name: sylox-types constants regression test, with demo-time on
+        run: cargo test -p sylox-types --features demo-time
+      - name: demo_build() reads true, with demo-time on
+        run: cargo test -p risk-oracle --features demo-time demo_build_is_true_with_the_demo_time_feature
 
   web:
     name: web workspace (typecheck, lint, test, build)

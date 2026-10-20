@@ -15,6 +15,8 @@ pub mod time;
 pub mod treasury;
 pub mod treasury_deposit;
 pub mod ttl;
+#[cfg(feature = "testutils")]
+pub mod ttl_check;
 pub mod upgrade;
 
 pub use assets::*;

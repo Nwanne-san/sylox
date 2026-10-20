@@ -64,4 +64,7 @@ pub enum Error {
     /// Design note Section 2, M1: the newest posted sub-epoch is older
     /// than the last closed one, outside `feed_grace_secs`.
     FeedBehind = 517,
+    /// `buy_cover`: the premium at execution is above the buyer's
+    /// signed `max_premium`.
+    PremiumAboveMax = 518,
 }

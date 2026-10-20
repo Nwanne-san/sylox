@@ -2,7 +2,9 @@ extern crate std;
 
 mod golden_vectors;
 mod property;
+mod release_wasm;
 mod sub_epochs;
+mod ttl;
 
 use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger as _},
@@ -77,9 +79,16 @@ fn epoch_at_time(timestamp: u64) -> u64 {
 /// The first ledger timestamp at which a score computed from
 /// `last_epoch` reads stale, i.e. the smallest `now` for which
 /// `is_stale_epoch`'s own condition (`now / EPOCH_SECS -
-/// last_epoch > STALE_AFTER_EPOCHS`) first holds.
+/// last_epoch > SCORE_STALE_AFTER_EPOCHS`) first holds. Every real
+/// call site below exercises `check_stale`/`asset_stale`, the
+/// `score()`/`check_stale` family judged against
+/// `SCORE_STALE_AFTER_EPOCHS`, never `is_stale`'s own
+/// `STALE_AFTER_EPOCHS` (see `is_stale_false_right_after_posting_
+/// then_true_after_stale_after_epochs`, which hardcodes its own
+/// timestamps against `STALE_AFTER_EPOCHS` instead, deliberately not
+/// sharing this helper).
 fn first_stale_time(last_epoch: u64) -> u64 {
-    (last_epoch + crate::STALE_AFTER_EPOCHS + 1) * crate::EPOCH_SECS
+    (last_epoch + crate::SCORE_STALE_AFTER_EPOCHS + 1) * crate::EPOCH_SECS
 }
 
 /// The epoch `SIGNAL_DISPUTE_SECS` after `epoch`'s own close, i.e. how
@@ -3308,6 +3317,32 @@ fn version_reads_contract_version_constant() {
     assert_eq!(fixture.client.version(), crate::CONTRACT_VERSION);
 }
 
+/// CI's own `demo-time-not-in-release` job proves this against the
+/// real release wasm, not this test harness; this test proves the
+/// other half - that `cfg!` actually tracks the feature at all,
+/// across both configurations `cargo test` can be run under. Without
+/// `--features demo-time` (every normal run, including CI's own
+/// `cargo test --workspace`), this must read `false`.
+#[test]
+fn demo_build_is_false_without_the_demo_time_feature() {
+    let env = Env::default();
+    let fixture = setup(&env);
+    assert!(!fixture.client.demo_build());
+}
+
+/// The other side: compiled in ONLY when this crate itself is built
+/// with `--features demo-time` (`cargo test -p risk-oracle --features
+/// demo-time`), so a normal test run never even sees it - confirms
+/// the flag actually flips `demo_build()`, not just that the false
+/// case reads false.
+#[cfg(feature = "demo-time")]
+#[test]
+fn demo_build_is_true_with_the_demo_time_feature() {
+    let env = Env::default();
+    let fixture = setup(&env);
+    assert!(fixture.client.demo_build());
+}
+
 /// Non-governor cannot upgrade: same native auth trap as every other
 /// governor-gated call (see
 /// `missing_auth_traps_natively_rather_than_returning_unauthorized`
@@ -3391,6 +3426,131 @@ fn migrate_cannot_run_twice() {
     fixture.client.migrate();
     let result = fixture.client.try_migrate();
     assert_eq!(result, Err(Ok(Error::AlreadyMigrated)));
+}
+
+/// `set_governor` works exactly once: the current governor hands off
+/// to a new address, and every governor-gated call afterward is
+/// authorized against the NEW address, not the old one.
+#[test]
+fn set_governor_succeeds_once_and_the_new_governor_is_accepted() {
+    let env = Env::default();
+    let fixture = setup(&env);
+    let new_governor = Address::generate(&env);
+
+    fixture.client.set_governor(&new_governor);
+
+    // A governor-gated call now succeeds under mock_all_auths() no
+    // matter which address signs (the mock approves every
+    // require_auth()), so the real proof the new governor is the one
+    // actually recorded is the dedicated non-auth trap test below,
+    // which registers its own contract with no mock_all_auths() at
+    // all and checks the OLD governor is rejected while the NEW one
+    // is accepted.
+    let new_wasm_hash = env.upload(RiskOracle);
+    fixture.client.upgrade(&new_wasm_hash);
+    assert_event_topics(&env, "upgraded", &fixture.client.address);
+}
+
+/// `set_governor` cannot run twice: `GovernorAlreadySet` on the second
+/// call, confirmed via `try_set_governor` since this is a real
+/// returned error, not a native auth trap. Same one-time-lock shape
+/// as `migrate_cannot_run_twice` and EventRegistry's
+/// `set_factory_succeeds_once_then_locks`.
+#[test]
+fn set_governor_fails_the_second_call() {
+    let env = Env::default();
+    let fixture = setup(&env);
+
+    fixture.client.set_governor(&Address::generate(&env));
+    let result = fixture.client.try_set_governor(&Address::generate(&env));
+
+    assert_eq!(result, Err(Ok(Error::GovernorAlreadySet)));
+}
+
+/// Non-governor cannot call `set_governor`: same native auth trap as
+/// every other governor-gated call (see
+/// `upgrade_without_governor_auth_traps` above), demonstrated with no
+/// `mock_all_auths()` so the governor's signature is genuinely
+/// missing.
+#[test]
+#[should_panic]
+fn set_governor_without_governor_auth_traps() {
+    let env = Env::default();
+    let staking = env.register(MockStaking, ());
+    let governor = Address::generate(&env);
+    let registry = Address::generate(&env);
+    let contract_id = env.register(
+        RiskOracle,
+        (governor.clone(), registry.clone(), staking.clone()),
+    );
+    let client = RiskOracleClient::new(&env, &contract_id);
+
+    // No mock_all_auths(): the governor never actually signs this call.
+    client.set_governor(&Address::generate(&env));
+}
+
+/// After a successful handover, the OLD governor is rejected on a
+/// governor-gated call and the NEW governor is accepted, proving
+/// `set_governor` genuinely changed which address is authorized, not
+/// just that the call itself succeeded once.
+#[test]
+fn set_governor_old_governor_rejected_new_governor_accepted() {
+    let env = Env::default();
+    let staking = env.register(MockStaking, ());
+    let old_governor = Address::generate(&env);
+    let new_governor = Address::generate(&env);
+    let registry = Address::generate(&env);
+    let contract_id = env.register(
+        RiskOracle,
+        (old_governor.clone(), registry.clone(), staking.clone()),
+    );
+    let client = RiskOracleClient::new(&env, &contract_id);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &old_governor,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_governor",
+            args: (new_governor.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_governor(&new_governor);
+
+    let new_wasm_hash = env.upload(RiskOracle);
+
+    // The old governor is no longer the one recorded: a call it signs
+    // for still traps natively, exactly like any other non-governor
+    // caller.
+    let old_governor_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &old_governor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (new_wasm_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.upgrade(&new_wasm_hash);
+    }));
+    assert!(
+        old_governor_result.is_err(),
+        "the old governor must be rejected once set_governor has handed off"
+    );
+
+    // The new governor, signing for itself, succeeds.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &new_governor,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "upgrade",
+            args: (new_wasm_hash.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.upgrade(&new_wasm_hash);
+    assert_event_topics(&env, "upgraded", &client.address);
 }
 
 /// Non-governor cannot migrate: same native auth trap pattern as

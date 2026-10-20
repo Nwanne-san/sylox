@@ -26,6 +26,22 @@ to make getting this wrong harder.
    exists. Never run alongside the backfill or smoke test on the same
    asset; see `--live`'s own section below.
 
+## `deploy.sh testnet-demo`: a separate target directory
+
+A separate, self-contained path (`deploy/deploy.sh testnet-demo` plus
+`deploy/demo/scenario.sh`): own testnet identities
+(`sylox-demo-time-*`), own `deployments/testnet-demo.json`, never
+touching anything the four steps above use. Its build sets
+`CARGO_TARGET_DIR` to `target/demo-time`, never the default
+`target/wasm32v1-none/release/` step 1 above and CI's own
+`build-contracts` job both read from: `cargo`/`stellar contract build`
+write each contract's Wasm to a fixed path regardless of which feature
+set produced it, so a demo-time build sharing that directory would
+silently replace the real, no-features release artifact with one that
+must never reach a real deployment (`RiskOracle.demo_build()`). After
+a `testnet-demo` run, `target/wasm32v1-none/release/` still holds only
+normal-build Wasm.
+
 ## Why the order matters: `first_epoch` is write-once
 
 `RiskOracle.first_epoch(asset)` is set exactly once, by whichever post
@@ -287,17 +303,23 @@ time.
 
 ## `deploy/extend-ttl.sh`: a TTL stopgap for issue #28
 
-**This is a stopgap, not the real fix.** None of RiskOracle,
-EventRegistry, Treasury or Staking ever call `extend_ttl` on their own
-current-state storage, so every persistent/instance entry they write
-quietly ages toward expiry with nothing refreshing it. Measuring every
-tracked entry's `liveUntilLedgerSeq` (issue #28) showed the earliest
-expiring about 6 days out, too soon to wait for the real fix (extend
-TTL on write, per #28's own policy) to ship through `upgrade()`
-(#12). **Remove this script and its call site in
-`deploy/post-demo-signals.sh` once `upgrade()` ships that fix** - this
-script's whole job disappears the moment the contracts extend their
-own TTL on write.
+**This is a stopgap, not the real fix.** The RiskOracle,
+EventRegistry, Treasury and Staking contracts live on testnet never
+call `extend_ttl` on their own current-state storage, so every
+persistent/instance entry they write quietly ages toward expiry with
+nothing refreshing it. Measuring every tracked entry's
+`liveUntilLedgerSeq` (issue #28) showed the earliest expiring about 6
+days out.
+
+**The real fix is now in the contract code, but not yet on testnet.**
+As of `fix/ttl-policy`, every state-changing call extends the
+contract's instance TTL and every persistent write extends that entry,
+with the shared `sylox_types::ttl` constants. The live contracts only
+get this once each one is upgraded to that code through `upgrade()`
+(#12). **The cron stays until then: keep this script and its call site
+in `deploy/post-demo-signals.sh` until every live contract runs code
+with the fix, and remove both only after that upgrade.** Its job
+disappears once the live contracts extend their own TTL on write.
 
 `deploy/extend-ttl.sh testnet` runs at the end of every
 `post-demo-signals.sh testnet --live` pass (every 5 minutes), after
@@ -316,12 +338,18 @@ enumerating every epoch or hour ever posted would make this script's
 own cost grow forever, instead of staying flat. A history key ages out
 on its own and is individually restorable later if something rare (a
 dispute, an audit) ever needs it again; that is an acceptable cost
-here, not a live-read outage. The margin backing that call is thin: a
-fresh history entry starts with about 7 days of TTL, and the longest a
-live call needs one is the 2h dispute window plus the 6 day ruling
-window (`SIGNAL_DISPUTE_RULING_SECS` = 518,400s) - about 22 hours of
-slack. This script does not widen that margin; only the real fix
-(extend on write, through `upgrade()`) can make it unnecessary.
+here, not a live-read outage. On the live contracts the margin
+backing that call is thin: a fresh history entry starts with about 7
+days of TTL, and the longest a live call needs one is the 2h dispute
+window plus the 6 day ruling window (`SIGNAL_DISPUTE_RULING_SECS` =
+518,400s) - about 22 hours of slack. The contract code now removes it:
+every write-once history key (`Signals`, `HourPostedVia`, `SubSignals`,
+`Overturned`, `SubOverturned`, `SubRepostUsed`) is extended to 10 days
+on write, almost 4 days of slack, and an overturn re-extends the other
+`SubSignals` of its hour (technical-doc.md Section 15.2). The live
+contracts get that
+through `upgrade()`; this script does not widen the margin, and stays
+until then.
 
 **Token balances: every one of our own contracts x every token, never
 a classic account's.** A SAC's `Balance(Address)` key is a real
@@ -383,6 +411,10 @@ can't drift from the real one) and runs it against small JSON samples
 literal `0`) - audited every other `jq` lookup in `extend-ttl.sh` for
 the same `select(...) // default` shape at the same time; this was the
 only one.
+
+## Dispute timeouts
+
+A signal dispute nobody closes before its ruling deadline stays open, with its bonds locked and its hour unbuilt, until someone calls `RiskOracle.resolve_signal_dispute_timeout` or `resolve_sub_dispute_timeout`; both are permissionless, the keeper service calls every due one each epoch alongside `checkpoint_cure` (issue #20), and a call made after the dispute record's TTL restores the archived records at the caller's cost (`docs/design/held-repost-disputes.md` D4).
 
 ## Upgrading a contract (issue #12)
 
@@ -469,18 +501,32 @@ works on any network) and landing together with the code that
 actually reads it, so it is testable against real behavior - following
 the upgrade procedure above.
 
-### The live contracts cannot be upgraded yet
+### The live contracts already have `upgrade()`
 
-The contracts already deployed to testnet (`deployments/testnet.json`)
-do not have `upgrade()` at all - adding it, like any other function
-addition, requires one more redeploy under fresh addresses before
-`upgrade()` becomes available for every fix after this one. Issue #21
-(constructor instead of `initialize`) ships in the same redeploy,
-since both need fresh contract addresses anyway - `deploy/deploy.sh`
-already uses the constructor flow described below. **Do not run this
-redeploy without an explicit go-ahead; nothing below is scheduled.**
+This section previously said the live contracts had no `upgrade()`
+and needed a fresh redeploy before the procedure above could be used
+at all. That was true when written, but is no longer: PR #63 (issue
+#12, "Add upgrade(), version(), migrate() to all four core
+contracts") merged 2026-10-11T04:53:29Z, and the testnet redeploy
+recorded in `deployments/testnet.json` (`git_commit`: `9dbeba7`,
+`deployed_at`: 2026-10-11T15:00:08Z) happened afterward and includes
+it - confirmed directly, not assumed: `version()` answers `1` on all
+four live contracts today, and a fresh build of `9dbeba7` produces
+the exact same WASM hash as each one's own `wasm_hash` in
+`deployments/testnet.json`. The procedure above (build, `upgrade`,
+verify `version()`, update the deployment record) is the real,
+usable path for every fix today - no fresh redeploy needed first.
 
-**Everything that needs re-running, in order, once approved:**
+**The fresh-redeploy procedure below is kept for the situation it
+actually applies to**: a change that needs a NEW contract address
+outright (a constructor argument shape change, for instance), not an
+in-place code upgrade. It does not apply to #12 itself anymore, and
+should not be read as a current blocker - it was one, once, and the
+note above exists so a future reader does not repeat this mistake
+from a stale comment the same way this plan's own first draft did.
+
+**Everything that needs re-running, in order, if a fresh redeploy
+is ever genuinely needed again:**
 
 1. `deploy/deploy.sh testnet` - fresh contract addresses, fresh
    `deployments/testnet.json`. Deploys through the constructor flow

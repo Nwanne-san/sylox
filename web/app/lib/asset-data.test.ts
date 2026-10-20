@@ -198,6 +198,74 @@ describe("fetchConfirmed", () => {
     expect(confirmed).toBeNull();
     expect(latestPending).toBeNull();
   });
+
+  it("maps the sentinel pending_until (u64::MAX, an hour still waiting on its sub-epochs) to pendingUntil: null, never a raw bigint a formatter could overflow on", async () => {
+    // The real shape RiskOracle.ring() returns for a waiting hour:
+    // HOUR_PENDING_SENTINEL (contracts/risk-oracle/src/lib.rs's
+    // refresh_waiting_hour), confirmed directly against live testnet
+    // USDC data before this fix (113 of 240 ring hours carried exactly
+    // this value). Number(18446744073709551615n) * 1000 overflows past
+    // Number.MAX_SAFE_INTEGER, which is what produced "can still be
+    // challenged until NaN:NaN UTC" in AssetPageClient.tsx before this
+    // fix - new Date() on that overflowed number is an Invalid Date, and
+    // getUTCHours()/getUTCMinutes() on an Invalid Date both return NaN.
+    const HOUR_PENDING_SENTINEL = BigInt("18446744073709551615");
+    const newestEpoch = BigInt(500_000);
+    const ringSlots: EffectiveRingSlot[] = Array.from({ length: RING_SLOTS }, () => effectiveSlot(emptySlot(), "Empty"));
+    ringSlots[RING_SLOTS - 1] = effectiveSlot(
+      pendingSlot(newestEpoch, 0.9995, HOUR_PENDING_SENTINEL),
+      "Pending",
+    );
+
+    oracleRing.mockResolvedValue(ringSlots);
+
+    const { fetchConfirmed } = await import("./asset-data");
+    const { latestPending } = await fetchConfirmed("ASSET");
+
+    expect(latestPending).not.toBeNull();
+    expect(latestPending!.pegRatio).toBeCloseTo(0.9995, 5);
+    expect(latestPending!.pendingUntil).toBeNull();
+  });
+
+  it("keeps a real, finite pending_until as a bigint (not null) when the hour genuinely has a deadline", async () => {
+    const newestEpoch = BigInt(500_000);
+    const realDeadline = BigInt(1_800_000_000);
+    const ringSlots: EffectiveRingSlot[] = Array.from({ length: RING_SLOTS }, () => effectiveSlot(emptySlot(), "Empty"));
+    ringSlots[RING_SLOTS - 1] = effectiveSlot(pendingSlot(newestEpoch, 0.9995, realDeadline), "Pending");
+
+    oracleRing.mockResolvedValue(ringSlots);
+
+    const { fetchConfirmed } = await import("./asset-data");
+    const { latestPending } = await fetchConfirmed("ASSET");
+
+    expect(latestPending).not.toBeNull();
+    expect(latestPending!.pendingUntil).toBe(realDeadline);
+  });
+});
+
+describe("newestEffectiveFinalPegRatio", () => {
+  it("is the same walk fetchConfirmed uses - the one source of truth every screen that shows 'current peg' reads from", async () => {
+    const newestEpoch = BigInt(500_000);
+    const ringSlots: EffectiveRingSlot[] = Array.from({ length: RING_SLOTS }, () => effectiveSlot(emptySlot(), "Empty"));
+    ringSlots[RING_SLOTS - 2] = effectiveSlot(finalSlot(newestEpoch - BigInt(1), 1.000025), "Final");
+    ringSlots[RING_SLOTS - 1] = effectiveSlot(pendingSlot(newestEpoch, 0.97, BigInt(9_999_999_999)), "Pending");
+
+    const { newestEffectiveFinalPegRatio } = await import("./asset-data");
+    const result = newestEffectiveFinalPegRatio(ringSlots);
+
+    // Matches the asset page's Confirmed card (fetchConfirmed, tested
+    // above with the identical ring shape): the newest EFFECTIVELY Final
+    // slot's value, never the still-Pending newer one.
+    expect(result).not.toBeNull();
+    expect(result!.epoch).toBe(newestEpoch - BigInt(1));
+    expect(result!.pegRatio).toBeCloseTo(1.000025, 5);
+  });
+
+  it("returns null when no slot is effectively Final yet", async () => {
+    const ringSlots: EffectiveRingSlot[] = Array.from({ length: RING_SLOTS }, () => effectiveSlot(emptySlot(), "Empty"));
+    const { newestEffectiveFinalPegRatio } = await import("./asset-data");
+    expect(newestEffectiveFinalPegRatio(ringSlots)).toBeNull();
+  });
 });
 
 describe("fetchLive", () => {

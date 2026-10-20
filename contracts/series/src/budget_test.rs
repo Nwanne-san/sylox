@@ -332,8 +332,12 @@ fn budget_buy_cover_full_168_slot_ring_and_64_quotes_walked() {
     // already spent real budget in this same `Env`; reset it so only
     // the one call actually being measured counts, matching
     // `event_registry::budget_test`'s own convention.
+    // Signed above the live premium so the refund transfer runs too:
+    // the worst case for `buy_cover`'s own cost.
+    let max_premium = series.premium_quote(&buy_amount, &(100 + QUOTE_COUNT)).1 + 1_000;
     env.cost_estimate().budget().reset_unlimited();
-    let (filled, _premium) = series.buy_cover(&buyer, &buy_amount, &(100 + QUOTE_COUNT));
+    let (filled, _premium) =
+        series.buy_cover(&buyer, &buy_amount, &(100 + QUOTE_COUNT), &max_premium);
     assert_eq!(filled, buy_amount, "all 64 quotes must fully fill");
 
     let estimate = env.cost_estimate();
@@ -361,8 +365,9 @@ fn budget_buy_cover_full_168_slot_ring_single_quote() {
 
     let buyer = Address::generate(&env);
     fx.usdc_admin_client.mint(&buyer, &MIN_DEPOSIT);
+    let max_premium = series.premium_quote(&MIN_DEPOSIT, &500u32).1 + 1_000;
     env.cost_estimate().budget().reset_unlimited();
-    let (filled, _premium) = series.buy_cover(&buyer, &MIN_DEPOSIT, &500u32);
+    let (filled, _premium) = series.buy_cover(&buyer, &MIN_DEPOSIT, &500u32, &max_premium);
     assert_eq!(filled, MIN_DEPOSIT);
 
     let estimate = env.cost_estimate();

@@ -230,7 +230,7 @@ Sellers post rates (annual % of cover) in an order book; buyers take the cheapes
 fn open_series(env, terms: SeriesTerms) -> Address; // terms pin one definition version per covered event type
 fn deposit(env, seller: Address, amount: i128); // on the series contract
 fn quote(env, seller: Address, rate_bps: u32, available: i128);
-fn buy_cover(env, buyer: Address, amount: i128, max_rate_bps: u32) -> (i128, i128); // (filled, premium)
+fn buy_cover(env, buyer: Address, amount: i128, max_rate_bps: u32, max_premium: i128) -> (i128, i128); // (filled, premium); refunds max_premium minus premium
 fn claim(env, holder: Address, amount: i128) -> i128;
 fn withdraw(env, seller: Address, amount: i128) -> i128;
 fn event_status(env, asset: Address, kind: EventKind) -> AssetEventStatus; // from the Credit Event Registry, per asset and event type

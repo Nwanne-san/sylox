@@ -442,10 +442,168 @@ run_live_mode() {
   return 0
 }
 
+# The pure half of build_recent_hours, factored out so it can be
+# tested without a network call (deploy/test-post-demo-signals-build-
+# recent-hours.sh): given hour_now, returns the hours this pass should
+# attempt to build, oldest first, one per line. hour_now - 4 is the
+# OLDEST hour whose own first sub-epoch (sub 0, at hour*EPOCH_SECS) can
+# still be inside Sub(asset)'s own ring at this exact moment - any
+# older and that sub's own ring position has already been overwritten
+# by a newer sub-epoch at the same `(sub_start / SUB_EPOCH_GRID_SECS) %
+# SUB_RING_SLOTS` position (confirmed directly from
+# contracts/risk-oracle/src/storage.rs's own position_of_sub: the ring
+# position is a pure wall-clock modulo, not relative to whatever was
+# last written, so "5 hours deep" really does mean "within the last 5
+# hours of real time", not "5 hours behind the newest post"). hour_now
+# - 1 is the newest CLOSED hour; hour_now itself is still open, so
+# build_hour would correctly reject it anyway (not final-eligible yet)
+# but there is no reason to even try.
+candidate_build_hours() {
+  local hour_now="$1"
+  local hour
+  for (( hour = hour_now - 4; hour < hour_now; hour++ )); do
+    (( hour < 0 )) && continue
+    echo "$hour"
+  done
+}
+
+# post_sub_signals's own inline build_hour attempt only fires once, on
+# whichever call happens to complete an hour's last sub-epoch - and
+# that call almost always
+# lands while most of the hour's own sub-epochs are still inside their
+# 2h SIGNAL_DISPUTE_SECS pending window, so the attempt fails with
+# SubEpochNotReady and nothing ever tries again. Nobody else calls
+# build_hour either. Sub(asset)'s own ring only holds SUB_RING_SPAN_SECS
+# (5h) of raw sub-epoch data; once an hour ages past that, its own
+# readings are gone from the ring and build_hour can never succeed for
+# it again (confirmed directly against testnet this session: an old,
+# never-built hour simulates build_hour successfully but with
+# sub_count_final: 0, since there is nothing left to read). The result:
+# USDC's hourly Signals slot stopped advancing on the real live
+# deployment, and score() never got a newest_final to compute from.
+#
+# Run every --live pass, after posting: for each candidate hour
+# (candidate_build_hours, above), skip it if it is already is_final
+# (the common case, once this runs on a schedule - nothing to do most
+# ticks), otherwise call build_hour and log whichever real outcome the
+# contract itself reports: built (coverage at or above
+# MIN_SUB_COVERAGE_BPS, or built down to Empty below it - both are
+# build_hour returning Ok, not a failure), not yet ready
+# (SubEpochNotReady - still has a sub inside its own dispute window;
+# normal, not failure, there's always a later tick), or a real error
+# (anything else - logged and counted, but still not fatal to this
+# pass, since one bad hour must never block the posting or TTL work
+# that already ran, or the next hour's own build attempt in the same
+# loop).
+# The pure half of a successful build_hour call's own classification,
+# factored out so it can be tested without a network call (deploy/
+# test-post-demo-signals-build-recent-hours.sh): given the real
+# build_hour output and the real is_final recheck's own result,
+# decides which of the three real outcomes this was. A real (not
+# simulated) build_hour call exiting 0 means the transaction landed,
+# never that the hour is now Final - build_hour can legitimately
+# build an hour down to Empty instead of Final when fewer than
+# MIN_SUB_COVERAGE_BPS (75%) of its own sub-epochs are Final
+# (contracts/risk-oracle/src/lib.rs), and is_final reads false for
+# Empty exactly like it does for a genuinely failed build (SlotState
+# has four variants - Empty, Pending, Disputed, Final - and is_final
+# only matches Final). The real transaction hash (present on every
+# genuine submission: "Signing transaction: <hash>" and the
+# stellar.expert link both carry it) is what actually tells "a real
+# transaction landed" apart from "the exit code was 0 for some other
+# reason" - is_final alone cannot, since Empty and "nothing happened"
+# both read false.
+classify_build_result() {
+  local build_out="$1" is_final_after="$2"
+  local tx_hash
+  tx_hash="$(echo "$build_out" | grep -oE '[a-f0-9]{64}' | head -1)"
+  if [[ -z "$tx_hash" ]]; then
+    echo "error"
+    return
+  fi
+  if [[ "$is_final_after" == "true" ]]; then
+    echo "built"
+  else
+    echo "built_empty"
+  fi
+}
+
+build_recent_hours() {
+  local now hour_now
+  now="$(date +%s)"
+  hour_now=$(( now / EPOCH_SECS ))
+
+  local built=0 built_empty=0 already_final=0 not_ready=0 errored=0
+  local built_list="" built_empty_list="" not_ready_list="" errored_list=""
+
+  local hour
+  for hour in $(candidate_build_hours "$hour_now"); do
+    local final_check
+    final_check="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account sylox-testnet-keeper \
+      --network testnet --send=no -- is_final --asset "$ASSET_ID" --epoch "$hour" 2>&1)"
+    if [[ "$final_check" == "true" ]]; then
+      already_final=$(( already_final + 1 ))
+      continue
+    fi
+
+    local build_out
+    if build_out="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account sylox-testnet-keeper \
+      --network testnet --send=yes -- build_hour --asset "$ASSET_ID" --hour "$hour" 2>&1)"; then
+      # --send=yes always submits; the CLI's own default only submits
+      # when its simulation detects ledger writes, published events,
+      # or required auth, and otherwise just returns the simulation
+      # result with exit code 0 - which would make a would-be real
+      # build look identical to a simulation-only one at this point.
+      # The CLI's own exit code says the call landed, not that the
+      # hour is actually Final now - classify_build_result (above)
+      # decides between a real Final build, a real but below-coverage
+      # Empty build, or something that only looked successful.
+      local final_recheck result
+      final_recheck="$("$STELLAR_BIN" contract invoke --id "$RO_ID" --source-account sylox-testnet-keeper \
+        --network testnet --send=no -- is_final --asset "$ASSET_ID" --epoch "$hour" 2>&1)"
+      result="$(classify_build_result "$build_out" "$final_recheck")"
+      case "$result" in
+        built)
+          built=$(( built + 1 ))
+          built_list+="$hour "
+          log "build_hour($hour): built"
+          ;;
+        built_empty)
+          built_empty=$(( built_empty + 1 ))
+          built_empty_list+="$hour "
+          log "build_hour($hour): WARNING - built as Empty (coverage below 75%): $build_out"
+          ;;
+        *)
+          errored=$(( errored + 1 ))
+          errored_list+="$hour "
+          log "build_hour($hour): error: build_hour reported success but no real transaction hash was found in its own output: $build_out"
+          ;;
+      esac
+    elif [[ "$build_out" == *"Error(Contract, #114)"* ]]; then
+      not_ready=$(( not_ready + 1 ))
+      not_ready_list+="$hour "
+      log "build_hour($hour): not ready yet (SubEpochNotReady); will retry on a later pass"
+    else
+      errored=$(( errored + 1 ))
+      errored_list+="$hour "
+      log "build_hour($hour): error: $build_out"
+    fi
+  done
+
+  log "build: built $built [${built_list% }], built empty $built_empty [${built_empty_list% }], already final $already_final, not ready $not_ready [${not_ready_list% }], errored $errored [${errored_list% }]"
+}
+
 if (( LIVE_MODE )); then
   log "Running one --live pass for $ASSET_ID (current and previous hour's closed sub-epochs only)"
   POSTING_EXIT=0
   run_live_mode || POSTING_EXIT=$?
+
+  # Not gated on POSTING_EXIT: a build attempt for an OLDER hour than
+  # the one this pass just posted to is independent of whether this
+  # pass's own posting succeeded, and a stuck, never-built hour is
+  # exactly the failure mode that justifies trying regardless.
+  log "Checking for recently closed hours ready to build"
+  build_recent_hours
 
   # Issue #28 stopgap: extend TTL on every tracked current-state entry
   # that's under 14 days from expiry, to about 30 days, AFTER posting.

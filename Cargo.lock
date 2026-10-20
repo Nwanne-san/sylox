@@ -916,8 +916,15 @@ dependencies = [
 name = "governor"
 version = "0.1.0"
 dependencies = [
+ "event-registry",
+ "market-factory",
+ "proptest",
+ "risk-oracle",
+ "series",
  "soroban-sdk",
+ "staking",
  "sylox-types",
+ "treasury",
 ]
 
 [[package]]

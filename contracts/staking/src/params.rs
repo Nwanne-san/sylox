@@ -46,7 +46,8 @@ pub const FAULT_MAJORITY_THRESHOLD: u32 = 3;
 /// a non `Unknown` aggregate (Section 7.4).
 pub const MIN_DISTINCT_REGIONS: u32 = 2;
 /// The rolling window faults are counted within (Section 7.5, "30 days").
-pub const FAULT_WINDOW_SECS: u64 = 2_592_000; // 30d
+/// 720 epochs.
+pub const FAULT_WINDOW_SECS: u64 = 720 * EPOCH_SECS;
 
 /// New (feat/staking). Cap on the per (asset, epoch) submitter index
 /// `aggregate`/`settle_epoch` iterate (lead decision item 2: "cap its
@@ -56,35 +57,37 @@ pub const FAULT_WINDOW_SECS: u64 = 2_592_000; // 30d
 /// while still bounding the loop's cost.
 pub const MAX_SUBMITTERS_PER_EPOCH: u32 = 32;
 
-/// technical-doc.md Section 23 (`RiskOracle`'s own epoch length;
-/// Staking has no epochs of its own, but needs this to compute
+/// `RiskOracle`'s own epoch length (technical-doc.md Section 23),
+/// re-exported from `sylox_types::time` rather than duplicated: Staking
+/// has no epochs of its own, but needs this to compute
 /// `REPORTER_EXIT_DELAY_SECS` and the probe acceptance window
-/// correctly against `RiskOracle`'s epoch boundaries).
-pub const EPOCH_SECS: u64 = 3_600;
+/// correctly against `RiskOracle`'s epoch boundaries, and to scale
+/// along with it under the `demo-time` feature.
+pub use sylox_types::time::EPOCH_SECS;
 /// technical-doc.md Section 23 (`RiskOracle`'s own signal dispute
-/// window; needed here for `KEEPER_EXIT_DELAY_SECS`).
-pub const SIGNAL_DISPUTE_SECS: u64 = 7_200;
+/// window; needed here for `KEEPER_EXIT_DELAY_SECS`). 2 epochs.
+pub const SIGNAL_DISPUTE_SECS: u64 = 2 * EPOCH_SECS;
 
 /// New (feat/staking). How long after an epoch closes a reporter may
 /// still submit a probe for it (Section 7.3's "the just-closed epoch
 /// within a grace period"). Default: one epoch, matching the cadence
 /// probes are expected at (`probe_secs` is far shorter, 900s, but a
 /// full epoch of slack tolerates a reporter that was briefly down).
-pub const PROBE_GRACE_SECS: u64 = 3_600; // 1h
+pub const PROBE_GRACE_SECS: u64 = EPOCH_SECS;
 
 /// New (feat/staking). How long the settlement window stays open after
 /// an epoch's probe grace period ends (lead decision: settlement is
 /// only allowed while every probe for that epoch is GUARANTEED to
 /// still exist, never on a partial set, since probes are separate
 /// temporary entries with independently extendable TTLs and settling
-/// on a partial set is attackable).
-pub const SETTLE_WINDOW_SECS: u64 = 86_400; // 24h
+/// on a partial set is attackable). 24 epochs.
+pub const SETTLE_WINDOW_SECS: u64 = 24 * EPOCH_SECS;
 
 /// New (feat/staking). Margin added on top of the settlement window's
 /// own close when computing how long a probe's TTL must guarantee
 /// (lead decision item 4: "probe TTL >= grace period + settle_window_secs
-/// + 1 day").
-pub const PROBE_TTL_MARGIN_SECS: u64 = 86_400; // 1d
+/// + 1 day"). 24 epochs.
+pub const PROBE_TTL_MARGIN_SECS: u64 = 24 * EPOCH_SECS;
 
 /// New (feat/staking). Cooldown for a keeper or reporter's OWN,
 /// voluntary `unstake_request` while still registered and active (not
@@ -93,7 +96,8 @@ pub const PROBE_TTL_MARGIN_SECS: u64 = 86_400; // 1d
 /// `params_test`, so a reporter cannot use a voluntary unstake to exit
 /// faster than a governor removal would allow; stake in cooldown stays
 /// slashable until actually withdrawn (lead decision item 4).
-pub const UNSTAKE_COOLDOWN_SECS: u64 = 604_800; // 7d
+/// 168 epochs.
+pub const UNSTAKE_COOLDOWN_SECS: u64 = 168 * EPOCH_SECS;
 
 /// New (feat/staking). After `remove_keeper`, how long `Staking` must
 /// wait before `withdraw_keeper_bond` can pay out: long enough that the

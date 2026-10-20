@@ -289,6 +289,27 @@ fn treasury_and_definition_actions_round_trip() {
     }
 }
 
+/// docs/design/governor.md Section 4.3: the variants appended after
+/// `TreasurySpend` round trip like the original ones.
+#[test]
+fn appended_governor_actions_round_trip() {
+    let env = Env::default();
+    let asset = Address::generate(&env);
+    let actions = [
+        Action::SetGuardian(Address::generate(&env)),
+        Action::Pause(PauseScope::Signals),
+        Action::SetSubEpochSecs(asset.clone(), 300),
+        Action::SetHardCap(asset.clone(), 1_000 * SCALE),
+        Action::SetRelatedSellers(asset.clone(), vec![&env, Address::generate(&env)]),
+        Action::SetPriceGuard(asset.clone(), Some(Address::generate(&env))),
+        Action::SetPriceGuard(asset, None),
+        Action::SetFactory(Address::generate(&env)),
+    ];
+    for action in actions {
+        assert_eq!(roundtrip(&env, &action), action);
+    }
+}
+
 #[test]
 fn bond_keys_are_distinct_per_purpose() {
     let env = Env::default();

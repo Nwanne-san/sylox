@@ -13,12 +13,17 @@ dist/
 # is the same category (public contract/asset/address fields only, no
 # secret), committed so deploy/extend-ttl.sh can read the DEMOUSD
 # holder's address from a Railway container that never ran
-# deploy/demo-asset-trigger.sh locally. Everything else under
-# deployments/ (ad hoc local scratch, e.g. deploy/post-demo-signals.sh's
-# own inputs record) stays ignored.
+# deploy/demo-asset-trigger.sh locally. deployments/testnet-demo.json
+# is the same category again: deploy/deploy.sh testnet-demo writes it,
+# deploy/demo/scenario.sh reads it, and nothing in it is secret either
+# (same public contract/asset/address fields, the demo's own throwaway
+# testnet-demo identities only). Everything else under deployments/
+# (ad hoc local scratch, e.g. deploy/post-demo-signals.sh's own inputs
+# record) stays ignored.
 deployments/*.json
 !deployments/testnet.json
 !deployments/testnet-demo-asset.json
+!deployments/testnet-demo.json
 
 # Sylox landing page (web/landing/_moodboard is reference-only, never shipped)
 web/landing/_moodboard/

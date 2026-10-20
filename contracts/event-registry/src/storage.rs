@@ -101,9 +101,7 @@ pub fn get_cure_progress(env: &Env, event_id: u64) -> CureProgress {
 }
 
 pub fn set_cure_progress(env: &Env, event_id: u64, progress: &CureProgress) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::CureProgress(event_id), progress);
+    sylox_types::ttl::set_persistent(env, &DataKey::CureProgress(event_id), progress);
 }
 
 pub fn get_config(env: &Env) -> Option<Config> {
@@ -134,9 +132,7 @@ pub fn get_canonical(env: &Env, asset: &Address, kind: EventKind) -> u32 {
 }
 
 pub fn set_canonical(env: &Env, asset: &Address, kind: EventKind, version: u32) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Canonical(asset.clone(), kind), &version);
+    sylox_types::ttl::set_persistent(env, &DataKey::Canonical(asset.clone(), kind), &version);
 }
 
 pub fn get_def(
@@ -151,9 +147,11 @@ pub fn get_def(
 }
 
 pub fn set_def(env: &Env, def: &EventDefinition) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Def(def.asset.clone(), def.kind, def.version), def);
+    sylox_types::ttl::set_persistent(
+        env,
+        &DataKey::Def(def.asset.clone(), def.kind, def.version),
+        def,
+    );
 }
 
 pub fn get_event(env: &Env, id: u64) -> Option<EventRecord> {
@@ -161,9 +159,7 @@ pub fn get_event(env: &Env, id: u64) -> Option<EventRecord> {
 }
 
 pub fn set_event(env: &Env, record: &EventRecord) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Event(record.id), record);
+    sylox_types::ttl::set_persistent(env, &DataKey::Event(record.id), record);
 }
 
 pub fn get_status(env: &Env, asset: &Address, kind: EventKind) -> AssetEventStatus {
@@ -174,9 +170,7 @@ pub fn get_status(env: &Env, asset: &Address, kind: EventKind) -> AssetEventStat
 }
 
 pub fn set_status(env: &Env, asset: &Address, kind: EventKind, status: &AssetEventStatus) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::Status(asset.clone(), kind), status);
+    sylox_types::ttl::set_persistent(env, &DataKey::Status(asset.clone(), kind), status);
 }
 
 pub fn get_live_event(env: &Env, asset: &Address, kind: EventKind, version: u32) -> Option<u64> {
@@ -186,9 +180,7 @@ pub fn get_live_event(env: &Env, asset: &Address, kind: EventKind, version: u32)
 }
 
 pub fn set_live_event(env: &Env, asset: &Address, kind: EventKind, version: u32, id: u64) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::LiveEvent(asset.clone(), kind, version), &id);
+    sylox_types::ttl::set_persistent(env, &DataKey::LiveEvent(asset.clone(), kind, version), &id);
 }
 
 pub fn clear_live_event(env: &Env, asset: &Address, kind: EventKind, version: u32) {
@@ -205,9 +197,7 @@ pub fn get_active_count(env: &Env, asset: &Address) -> u32 {
 }
 
 pub fn set_active_count(env: &Env, asset: &Address, count: u32) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::ActiveCount(asset.clone()), &count);
+    sylox_types::ttl::set_persistent(env, &DataKey::ActiveCount(asset.clone()), &count);
 }
 
 pub fn get_committee_misses(env: &Env, committee: &Address) -> u32 {
@@ -219,9 +209,7 @@ pub fn get_committee_misses(env: &Env, committee: &Address) -> u32 {
 
 pub fn increment_committee_misses(env: &Env, committee: &Address) -> u32 {
     let next = get_committee_misses(env, committee) + 1;
-    env.storage()
-        .persistent()
-        .set(&DataKey::CommitteeMisses(committee.clone()), &next);
+    sylox_types::ttl::set_persistent(env, &DataKey::CommitteeMisses(committee.clone()), &next);
     next
 }
 
@@ -232,9 +220,7 @@ pub fn get_left_at(env: &Env, asset: &Address, kind: EventKind, version: u32) ->
 }
 
 pub fn set_left_at(env: &Env, asset: &Address, kind: EventKind, version: u32, at: u64) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::LeftAt(asset.clone(), kind, version), &at);
+    sylox_types::ttl::set_persistent(env, &DataKey::LeftAt(asset.clone(), kind, version), &at);
 }
 
 pub fn clear_left_at(env: &Env, asset: &Address, kind: EventKind, version: u32) {

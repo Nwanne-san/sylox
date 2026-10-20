@@ -63,8 +63,13 @@ struct Config {
 
 const CONFIG_KEY: Symbol = soroban_sdk::symbol_short!("CONFIG");
 
+/// `set_governor`'s own one-time lock, same shape as EventRegistry's
+/// `FACTORY_SET_KEY`: absent until the first successful `set_governor`
+/// call, then permanently present, so a second call always fails.
+const GOVERNOR_SET_KEY: Symbol = soroban_sdk::symbol_short!("GOV_SET");
+
 /// Issue #12. Bump by hand on every `upgrade()` this contract ships.
-const CONTRACT_VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
 /// Issue #12. Instance key for `sylox_types::upgrade::do_migrate`'s own
 /// "which version has this contract's storage already been migrated to"
 /// marker.
@@ -79,6 +84,7 @@ impl Treasury {
     /// address here is computed in advance from a deterministic salt,
     /// deploy/deploy.sh's own "Constructor flow" section).
     pub fn __constructor(env: Env, governor: Address, staking: Address, usdc: Address) {
+        sylox_types::ttl::extend_instance(&env);
         env.storage().instance().set(
             &CONFIG_KEY,
             &Config {
@@ -106,6 +112,7 @@ impl Treasury {
     /// already uses.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         sylox_types::upgrade::do_upgrade(&env, &config.governor, CONTRACT_VERSION, new_wasm_hash);
         Ok(())
     }
@@ -122,6 +129,7 @@ impl Treasury {
     /// decode under the new types) alongside it.
     pub fn migrate(env: Env) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         if !sylox_types::upgrade::do_migrate(
             &env,
             &config.governor,
@@ -130,6 +138,25 @@ impl Treasury {
         ) {
             return Err(Error::AlreadyMigrated);
         }
+        Ok(())
+    }
+
+    /// One-time governor handover, for the Governor deployment cutover:
+    /// callable only by the CURRENT governor, exactly once. Same
+    /// one-time-lock pattern as `EventRegistry::set_factory` (a storage
+    /// flag checked before the write, set after it), so a second call
+    /// always fails rather than letting the governor be reassigned
+    /// again later through this same path.
+    pub fn set_governor(env: Env, new_admin: Address) -> Result<(), Error> {
+        let mut config = Self::require_config(&env)?;
+        config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
+        if env.storage().instance().has(&GOVERNOR_SET_KEY) {
+            return Err(Error::GovernorAlreadySet);
+        }
+        config.governor = new_admin;
+        env.storage().instance().set(&CONFIG_KEY, &config);
+        env.storage().instance().set(&GOVERNOR_SET_KEY, &true);
         Ok(())
     }
 
@@ -152,6 +179,7 @@ impl Treasury {
         amount: i128,
     ) -> Result<(), Error> {
         from.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -193,6 +221,7 @@ impl Treasury {
     ) -> Result<i128, Error> {
         let config = Self::require_config(&env)?;
         config.staking.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if !matches!(
             bucket,
             TreasuryBucket::KeeperRewards | TreasuryBucket::ReporterRewards
@@ -231,6 +260,7 @@ impl Treasury {
     /// Pays everything accrued to `who`. Auth: `who`.
     pub fn claim_reward(env: Env, who: Address) -> Result<i128, Error> {
         who.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         let config = Self::require_config(&env)?;
         let amount = storage::get_accrued(&env, &who);
         if amount <= 0 {
@@ -259,6 +289,7 @@ impl Treasury {
     ) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -284,6 +315,7 @@ impl Treasury {
     pub fn spend(env: Env, bucket: TreasuryBucket, to: Address, amount: i128) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }

@@ -9,6 +9,7 @@
 extern crate std;
 
 mod integration;
+mod max_premium;
 mod property;
 
 use soroban_sdk::{
@@ -16,7 +17,7 @@ use soroban_sdk::{
 };
 use sylox_types::{
     AssetEventStatus, Band, CoverGate, EventKind, SeriesState, SeriesTerms, SignalSet, SlotState,
-    SubEpoch, SubEpochConfig,
+    SubEpoch,
 };
 
 use crate::{Error, Series, SeriesClient};
@@ -126,9 +127,9 @@ impl MockRiskOracle {
             .unwrap_or(sylox_types::SCALE)
     }
 
-    pub fn sub_epoch_config(env: Env, _asset: Address) -> Option<SubEpochConfig> {
+    pub fn sub_epoch_secs_at(env: Env, _asset: Address, _hour: u64) -> u64 {
         let _ = env;
-        None
+        DEFAULT_SUB_EPOCH_SECS
     }
 }
 
@@ -357,6 +358,15 @@ fn default_terms(env: &Env, asset: &Address, settlement: &Address, start: u64) -
 }
 
 fn setup(env: &Env) -> Fixture<'_> {
+    setup_with_treasury(env, |env, _settlement| env.register(MockTreasury, ()))
+}
+
+/// `setup`, with the `Treasury` built by `make_treasury` from the
+/// settlement token's address.
+fn setup_with_treasury(
+    env: &Env,
+    make_treasury: impl FnOnce(&Env, &Address) -> Address,
+) -> Fixture<'_> {
     env.mock_all_auths();
     env.ledger().set_timestamp(1_000_000);
 
@@ -366,7 +376,6 @@ fn setup(env: &Env) -> Fixture<'_> {
     let registry = MockEventRegistryClient::new(env, &registry_id);
     let factory_id = env.register(MockMarketFactory, ());
     let factory = MockMarketFactoryClient::new(env, &factory_id);
-    let treasury = env.register(MockTreasury, ());
 
     let asset_issuer = Address::generate(env);
     let asset = env
@@ -376,6 +385,7 @@ fn setup(env: &Env) -> Fixture<'_> {
     let settlement = env
         .register_stellar_asset_contract_v2(settlement_issuer)
         .address();
+    let treasury = make_treasury(env, &settlement);
 
     factory.set_related_sellers(&asset, &Some(Vec::new(env)));
 
@@ -516,7 +526,12 @@ fn buy_cover_matches_the_section_10_5_worked_example() {
 
     // 90 days left: start == now, expiry == start + 90d, so
     // time_remaining == 90d == 7,776,000s exactly.
-    let (filled, premium) = fx.client.buy_cover(&buyer, &(80_000 * usdc), &500);
+    let (filled, premium) = fx.client.buy_cover(
+        &buyer,
+        &(80_000 * usdc),
+        &500,
+        &fx.client.premium_quote(&(80_000 * usdc), &500).1,
+    );
     assert_eq!(filled, 80_000 * usdc);
 
     // B (cheaper, 300bps) fills first and fully (50,000 of its own
@@ -553,7 +568,12 @@ fn buy_cover_rejects_when_asset_is_stale() {
     fx.oracle.set_stale(&fx.asset, &true);
     let buyer = Address::generate(&env);
     mint_settlement(&env, &fx, &buyer, 1_000_000_000);
-    let result = fx.client.try_buy_cover(&buyer, &1_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::AssetStale)));
 }
 
@@ -563,7 +583,12 @@ fn buy_cover_rejects_when_band_is_distress() {
     let fx = setup(&env);
     fx.oracle.set_band(&fx.asset, &Band::Distress);
     let buyer = Address::generate(&env);
-    let result = fx.client.try_buy_cover(&buyer, &1_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::AssetDistressed)));
 }
 
@@ -574,7 +599,12 @@ fn buy_cover_rejects_on_event_in_progress() {
     fx.registry
         .set_cover_gate(&fx.asset, &CoverGate::EventInProgress);
     let buyer = Address::generate(&env);
-    let result = fx.client.try_buy_cover(&buyer, &1_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::AssetDistressed)));
 }
 
@@ -585,7 +615,12 @@ fn buy_cover_rejects_on_recent_depeg() {
     fx.registry
         .set_cover_gate(&fx.asset, &CoverGate::RecentDepeg);
     let buyer = Address::generate(&env);
-    let result = fx.client.try_buy_cover(&buyer, &1_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::RecentFailureSignals)));
 }
 
@@ -595,7 +630,12 @@ fn buy_cover_rejects_feed_behind() {
     let fx = setup(&env);
     fx.oracle.set_live_override(&fx.asset, &None);
     let buyer = Address::generate(&env);
-    let result = fx.client.try_buy_cover(&buyer, &1_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::FeedBehind)));
 }
 
@@ -609,7 +649,12 @@ fn buy_cover_rejects_fast_signal_pause() {
         .set_status(&fx.asset, &sylox_types::GuardStatus::Paused);
     fx.factory.set_price_guard(&fx.asset, &Some(guard_id));
     let buyer = Address::generate(&env);
-    let result = fx.client.try_buy_cover(&buyer, &1_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::FastSignalPause)));
 }
 
@@ -622,7 +667,12 @@ fn buy_cover_rejects_no_fill_when_no_quote_meets_the_rate() {
     fx.client.deposit(&seller, &5_000_000_000);
     fx.client.quote(&seller, &800, &5_000_000_000);
     let buyer = Address::generate(&env);
-    let result = fx.client.try_buy_cover(&buyer, &1_000_000, &500);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_000_000,
+        &500,
+        &fx.client.premium_quote(&1_000_000, &500).1,
+    );
     assert_eq!(result, Err(Ok(Error::NoFill)));
 }
 
@@ -636,7 +686,12 @@ fn buy_cover_rejects_over_series_cap() {
     fx.client.quote(&seller, &100, &2_000_000_000_000);
     let buyer = Address::generate(&env);
     mint_settlement(&env, &fx, &buyer, 100_000_000_000);
-    let result = fx.client.try_buy_cover(&buyer, &1_100_000_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &1_100_000_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_100_000_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::SeriesCapExceeded)));
 }
 
@@ -650,7 +705,12 @@ fn buy_cover_rejects_over_buyer_cap() {
     fx.client.quote(&seller, &100, &2_000_000_000_000);
     let buyer = Address::generate(&env);
     mint_settlement(&env, &fx, &buyer, 1_000_000_000_000);
-    let result = fx.client.try_buy_cover(&buyer, &950_000_000_000, &1_000);
+    let result = fx.client.try_buy_cover(
+        &buyer,
+        &950_000_000_000,
+        &1_000,
+        &fx.client.premium_quote(&950_000_000_000, &1_000).1,
+    );
     assert_eq!(result, Err(Ok(Error::BuyerCapExceeded)));
 }
 
@@ -664,7 +724,12 @@ fn trigger_and_claim_after_a_declared_event() {
     mint_settlement(&env, &fx, &buyer, 10_000_000_000);
     fx.client.deposit(&seller, &10_000_000_000);
     fx.client.quote(&seller, &300, &10_000_000_000);
-    let (filled, _) = fx.client.buy_cover(&buyer, &5_000_000_000, &1_000);
+    let (filled, _) = fx.client.buy_cover(
+        &buyer,
+        &5_000_000_000,
+        &1_000,
+        &fx.client.premium_quote(&5_000_000_000, &1_000).1,
+    );
     assert!(filled > 0);
 
     fx.registry.set_event_status(
@@ -693,7 +758,12 @@ fn claim_for_rejects_before_the_claim_window_and_succeeds_after() {
     mint_settlement(&env, &fx, &buyer, 10_000_000_000);
     fx.client.deposit(&seller, &10_000_000_000);
     fx.client.quote(&seller, &300, &10_000_000_000);
-    let (filled, _) = fx.client.buy_cover(&buyer, &5_000_000_000, &1_000);
+    let (filled, _) = fx.client.buy_cover(
+        &buyer,
+        &5_000_000_000,
+        &1_000,
+        &fx.client.premium_quote(&5_000_000_000, &1_000).1,
+    );
 
     fx.registry.set_event_status(
         &fx.asset,
@@ -815,7 +885,12 @@ fn sep41_transfer_approve_and_burn() {
     mint_settlement(&env, &fx, &buyer, 10_000_000_000);
     fx.client.deposit(&seller, &10_000_000_000);
     fx.client.quote(&seller, &300, &10_000_000_000);
-    let (filled, _) = fx.client.buy_cover(&buyer, &1_000_000_000, &1_000);
+    let (filled, _) = fx.client.buy_cover(
+        &buyer,
+        &1_000_000_000,
+        &1_000,
+        &fx.client.premium_quote(&1_000_000_000, &1_000).1,
+    );
 
     fx.client.transfer(&buyer, &other, &(filled / 2));
     assert_eq!(fx.client.balance(&other), filled / 2);

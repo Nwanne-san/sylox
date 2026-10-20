@@ -18,20 +18,20 @@
 //! series pins the version canonical when it opened; a newer version
 //! can supersede that one while the series is still live, and a real
 //! failure discovered after that point must still be provable against
-//! the OLDER, still-pinned version. Corrected by design review item D3:
-//! `version` is accepted only if it is canonical, or `version_has_live_cover`
-//! reports a live series still pins it (always `false` in this build,
-//! `MarketFactory` is out of scope: every proposal in this build is
-//! canonical-only, in practice).
+//! the OLDER, still-pinned version. `version` is accepted only if it
+//! is canonical, or `version_has_live_cover` reports a live series
+//! still pins it (always `false` in this build, `MarketFactory` is
+//! out of scope: every proposal in this build is canonical-only, in
+//! practice).
 //!
 //! **Lead decision (design note Section 6): `ActiveCount(asset)`
 //! replaces a single boolean push to `RiskOracle.set_event_in_progress`.**
 //! Several (kind, version) events can be live for one asset at once;
-//! a boolean cannot represent that correctly. Design review item D3b:
-//! asset-wide effects (this count, the oracle push, `set_event_band`)
-//! fire only for a CANONICAL-version event.
+//! a boolean cannot represent that correctly. Asset-wide effects
+//! (this count, the oracle push, `set_event_band`) fire only for a
+//! CANONICAL-version event.
 //!
-//! **No compliance-action exclusion mechanism (design review item D5).**
+//! **No compliance-action exclusion mechanism.**
 //! An earlier draft of the design note invented one; it was an
 //! unbonded, unilateral governor veto over an IssuerFreeze payout and
 //! is dropped. Section 8.2's own requirement ("no governance flag
@@ -41,22 +41,22 @@
 //! action challenges the proposal with evidence, and the committee
 //! rules.
 //!
-//! **No time-based cooldown after Cured/Rejected (design review item
-//! D4).** `propose_tier1` instead accepts a new proposal for the same
+//! **No time-based cooldown after Cured/Rejected.**
+//! `propose_tier1` instead accepts a new proposal for the same
 //! (asset, kind, version) once its own freshly computed `window_start`
 //! is strictly after the prior event's own `left_at` (the
 //! `storage::get_left_at`/`LeftAt` check inside `propose_tier1`
 //! below); see the design note's own Section 2a for the argument
 //! this still rejects re-proposing unchanged data.
 //!
-//! **Cure is strict (design review item R1).** Any permanently missing
+//! **Cure is strict.** Any permanently missing
 //! epoch anywhere in the cure window means no cure at all, routing to
 //! Declared unconditionally; there is no partial credit for a window
 //! a keeper (who may also have sold cover on the series) can
 //! selectively leave incomplete. "Permanently missing" tests the
-//! slot's own state (`Empty`, review item R2), never elapsed time
+//! slot's own state (`Empty`), never elapsed time
 //! alone; a `Disputed` epoch is "not ready" until resolved or timed
-//! out (review item R3), which `guaranteed_finalizable_at`'s own
+//! out, which `guaranteed_finalizable_at`'s own
 //! worst-case formula accounts for (see `finalize` and its tests).
 
 mod clients;
@@ -74,24 +74,20 @@ pub use error::Error;
 use storage::Config;
 
 use clients::{GovernorClient, MarketFactoryClient, RiskOracleClient, StakingClient};
-
-/// Epoch length. Frozen for v1 (technical-doc.md Section 23); mirrors
-/// `RiskOracle`'s own private `EPOCH_SECS`, which `EventRegistry`
-/// cannot reach directly (separate contract crate), the same
-/// duplication `Staking::params::EPOCH_SECS` already carries.
-const EPOCH_SECS: u64 = 3_600;
+use sylox_types::time::EPOCH_SECS;
 
 /// Backfill window: how long after an epoch's own close a keeper may
-/// still post it (ADR-005). Mirrors `RiskOracle`'s own private
-/// `WINDOW_SECS`.
-const WINDOW_SECS: u64 = 259_200;
+/// still post it (ADR-005). Mirrors `RiskOracle`'s own `WINDOW_SECS`:
+/// both read the same shared `EPOCH_SECS`, so the two can never
+/// silently drift apart. 72 epochs.
+const WINDOW_SECS: u64 = 72 * EPOCH_SECS;
 
 /// IssuerFreeze's own fixed 7 day window (Section 8.2), and the Depeg
 /// liquidity baseline immediately before its own window (ADR-005):
 /// the same 168 epoch span, used for two different purposes.
 const BASELINE_EPOCHS: u64 = 7 * 24;
 
-/// PR #27 review (round 2): `check_depeg`'s own liquidity baseline
+/// `check_depeg`'s own liquidity baseline
 /// loop below has no minimum-count check of its own, only
 /// `liquidity_values.is_empty()` (catches zero real epochs, not
 /// "mostly missing"). Do NOT reuse `max_missing_epochs`: that field
@@ -105,7 +101,7 @@ const BASELINE_EPOCHS: u64 = 7 * 24;
 const MIN_BASELINE_FINAL_EPOCHS: u32 = BASELINE_EPOCHS as u32 - (WINDOW_SECS / EPOCH_SECS) as u32;
 const _: () = assert!(MIN_BASELINE_FINAL_EPOCHS > 0);
 
-/// PR #15 review, finding F3: the largest number of cure-window
+/// The largest number of cure-window
 /// epochs (`challenge_secs / EPOCH_SECS`) `validate_definition_params`
 /// will accept, 72 hours' worth. Keeps `storage::CureProgress`'s own
 /// `recorded: u128` bitmap comfortably sized for every definition
@@ -118,7 +114,7 @@ use sylox_types::time::MAX_CURE_EPOCHS;
 // ever classifies each cure-window epoch's CURRENT state, never
 // predicts when every epoch will settle); the test modules that
 // verify `guaranteed_finalizable_at`'s own worst-case formula
-// (design review item R3) each define their own local copies.
+// each define their own local copies.
 
 #[contract]
 pub struct EventRegistry;
@@ -139,6 +135,11 @@ const MIGRATED_TO_KEY: Symbol = symbol_short!("MIGRATE");
 /// every network regardless of what that redeploy's placeholder was.
 const FACTORY_SET_KEY: Symbol = symbol_short!("FACT_SET");
 
+/// `set_governor`'s own one-time lock, same shape as `FACTORY_SET_KEY`
+/// above: absent until the first successful `set_governor` call, then
+/// permanently present, so a second call always fails.
+const GOVERNOR_SET_KEY: Symbol = symbol_short!("GOV_SET");
+
 #[contractimpl]
 impl EventRegistry {
     /// Issue #21: a constructor, not a separate `initialize` call -
@@ -155,6 +156,7 @@ impl EventRegistry {
         factory: Address,
         usdc: Address,
     ) {
+        sylox_types::ttl::extend_instance(&env);
         storage::set_config(
             &env,
             &Config {
@@ -182,6 +184,7 @@ impl EventRegistry {
     /// alongside instead); not relevant yet on testnet.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         sylox_types::upgrade::do_upgrade(&env, &config.governor, CONTRACT_VERSION, new_wasm_hash);
         Ok(())
     }
@@ -198,6 +201,7 @@ impl EventRegistry {
     /// decode under the new types) alongside it.
     pub fn migrate(env: Env) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         if !sylox_types::upgrade::do_migrate(
             &env,
             &config.governor,
@@ -221,6 +225,7 @@ impl EventRegistry {
     pub fn set_factory(env: Env, factory: Address) -> Result<(), Error> {
         let mut config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if env.storage().instance().has(&FACTORY_SET_KEY) {
             return Err(Error::FactoryAlreadySet);
         }
@@ -230,12 +235,32 @@ impl EventRegistry {
         Ok(())
     }
 
+    /// One-time governor handover, for the Governor deployment cutover:
+    /// callable only by the CURRENT governor, exactly once. Same
+    /// one-time-lock pattern as `set_factory` above (a storage flag
+    /// checked before the write, set after it), so a second call
+    /// always fails rather than letting the governor be reassigned
+    /// again later through this same path.
+    pub fn set_governor(env: Env, new_admin: Address) -> Result<(), Error> {
+        let mut config = Self::require_config(&env)?;
+        config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
+        if env.storage().instance().has(&GOVERNOR_SET_KEY) {
+            return Err(Error::GovernorAlreadySet);
+        }
+        config.governor = new_admin;
+        storage::set_config(&env, &config);
+        env.storage().instance().set(&GOVERNOR_SET_KEY, &true);
+        Ok(())
+    }
+
     /// technical-doc.md Section 8.8. `def.version` is ignored on input
     /// (the caller cannot pick a version number); the stored version is
     /// always the previous canonical version plus one, starting at 1.
     pub fn register_definition(env: Env, def: EventDefinition) -> Result<u32, Error> {
         let config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
 
         let asset_config = RiskOracleClient::new(&env, &config.oracle)
             .asset_config(&def.asset)
@@ -295,7 +320,7 @@ impl EventRegistry {
     }
 
     /// technical-doc.md Section 8.2, as amended by this build's lead
-    /// decision (design note Section 2) and design review item D3.
+    /// decision (design note Section 2).
     pub fn propose_tier1(
         env: Env,
         caller: Address,
@@ -303,12 +328,13 @@ impl EventRegistry {
         kind: EventKind,
         version: u32,
     ) -> Result<u64, Error> {
-        // PR #15 review, finding F5: nothing pays a Tier 1 proposer in
+        // Nothing pays a Tier 1 proposer in
         // this build, but `caller` is still stored as `proposer` and
         // published in `EventProposed`, a public record an indexer
         // will display. Without this, anyone could propose in someone
         // else's name.
         caller.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         let config = Self::require_config(&env)?;
         let def = storage::get_def(&env, &asset, kind, version).ok_or(Error::UnknownDefinition)?;
 
@@ -330,7 +356,7 @@ impl EventRegistry {
             _ => return Err(Error::UnknownDefinition),
         };
 
-        // Design review item D4: gated by new data, not a time
+        // Gated by new data, not a time
         // cooldown. If a prior event for this exact (asset, kind,
         // version) left Proposed/Escalated into Cured or Rejected,
         // the new proposal's own freshly computed `window_start` must
@@ -388,6 +414,7 @@ impl EventRegistry {
         evidence: BytesN<32>,
     ) -> Result<(), Error> {
         challenger.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         let config = Self::require_config(&env)?;
         let mut record = storage::get_event(&env, event_id).ok_or(Error::UnknownEvent)?;
         if record.state != EventState::Proposed {
@@ -430,11 +457,12 @@ impl EventRegistry {
         Ok(())
     }
 
-    /// technical-doc.md Section 8.1, as corrected by design review
-    /// items D1 (cure window), D2/R2/R3 (three-way epoch state) and R1
-    /// (cure strictness). See `docs/design/event-registry.md` Section 5.
+    /// technical-doc.md Section 8.1, corrected for the cure window, a
+    /// three-way epoch state, and cure strictness. See
+    /// `docs/design/event-registry.md` Section 5.
     pub fn finalize(env: Env, event_id: u64) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         let mut record = storage::get_event(&env, event_id).ok_or(Error::UnknownEvent)?;
         if record.state != EventState::Proposed {
             return Err(Error::WrongState);
@@ -475,7 +503,7 @@ impl EventRegistry {
         }
     }
 
-    /// PR #15 review, finding F2. Permissionless (no `require_auth`):
+    /// Permissionless (no `require_auth`):
     /// anyone, including the keeper service, may call this to record
     /// a Depeg event's cure-window progress before an epoch that is
     /// already decidable rotates out of `RiskOracle`'s own ring.
@@ -486,6 +514,7 @@ impl EventRegistry {
     /// second time (`record_cure_progress`'s own recorded-bit check).
     pub fn checkpoint_cure(env: Env, event_id: u64) -> Result<storage::CureProgress, Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         let record = storage::get_event(&env, event_id).ok_or(Error::UnknownEvent)?;
         if record.state != EventState::Proposed {
             return Err(Error::WrongState);
@@ -506,6 +535,7 @@ impl EventRegistry {
         let config = Self::require_config(&env)?;
         let committee = GovernorClient::new(&env, &config.governor).committee();
         committee.require_auth();
+        sylox_types::ttl::extend_instance(&env);
 
         let mut record = storage::get_event(&env, event_id).ok_or(Error::UnknownEvent)?;
         if record.state != EventState::Escalated {
@@ -543,6 +573,7 @@ impl EventRegistry {
 
     pub fn resolve_timeout(env: Env, event_id: u64) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         let mut record = storage::get_event(&env, event_id).ok_or(Error::UnknownEvent)?;
         if record.state != EventState::Escalated {
             return Err(Error::WrongState);
@@ -765,7 +796,7 @@ impl EventRegistry {
         Ok(())
     }
 
-    /// technical-doc.md Section 8.5. Design review item D3b: asset-wide
+    /// technical-doc.md Section 8.5. Asset-wide
     /// effects (`set_event_band`, clearing the active count) fire only
     /// for a canonical-version event.
     fn declare(env: &Env, config: &Config, record: &EventRecord) -> Result<(), Error> {
@@ -864,7 +895,7 @@ fn validate_definition_params(def: &EventDefinition) -> Result<(), Error> {
                 return Err(Error::InvalidDefinition);
             }
             let window_epochs = def.depeg_window_secs / EPOCH_SECS;
-            // The ONE shared source for this ceiling (review finding):
+            // The ONE shared source for this ceiling:
             // sylox_types::time::MAX_DEPEG_WINDOW_EPOCHS, never a
             // separate copy of RING_SLOTS - BASELINE_EPOCHS computed
             // here, so this check and MAX_UNBUILT_HOURS_SCANNED_BY_
@@ -893,13 +924,13 @@ fn validate_definition_params(def: &EventDefinition) -> Result<(), Error> {
     if def.ruling_deadline_secs == 0 {
         return Err(Error::InvalidDefinition);
     }
-    // PR #15 review, finding F3: `challenge_secs` must be a whole
+    // `challenge_secs` must be a whole
     // number of epochs, between 1 and `MAX_CURE_EPOCHS`. Without the
     // lower bound, a short `challenge_secs` landing inside a single
     // epoch makes `cure_outcome`'s own cure-window loop run zero
     // times, which reads as "no failure observed" and cures with no
     // data at all. The upper bound keeps the cure window's own
-    // `CureProgress::recorded` bitmap (`u128`, finding F2) comfortably
+    // `CureProgress::recorded` bitmap (`u128`) comfortably
     // sized for every cure epoch it must address.
     if def.challenge_secs == 0
         || !def.challenge_secs.is_multiple_of(EPOCH_SECS)
@@ -956,7 +987,7 @@ fn effective_state_of(slot: &sylox_types::RingSlot, now: u64) -> SlotState {
     }
 }
 
-/// design note Section 5, review items R1/R2/R3.
+/// design note Section 5.
 /// `target_epoch` is the epoch actually being asked about, independent
 /// of whether `slot` carries any real data for it: `slot_for_epoch`
 /// returns `None` both when `target_epoch` is outside this `ring()`
@@ -1032,7 +1063,7 @@ fn check_depeg(
         return Err(Error::Tier1CheckFailed);
     }
 
-    // 7 day baseline, strictly before the window. PR #25 review:
+    // 7 day baseline, strictly before the window.
     // `window_start_epoch < BASELINE_EPOCHS` alone only guards the
     // subtraction below from underflowing; on a real network
     // `window_start_epoch` is always far larger than `BASELINE_EPOCHS`
@@ -1052,7 +1083,7 @@ fn check_depeg(
             liquidity_values.push_back(slot.unwrap().liquidity_2pct);
         }
     }
-    // PR #27 review (round 2): `first_epoch` alone proves calendar
+    // `first_epoch` alone proves calendar
     // time has elapsed since this asset's first post, not that the
     // baseline is actually populated. A keeper could post once, go
     // dark for 168+ epochs, then resume right before the Depeg
@@ -1087,7 +1118,7 @@ fn check_issuer_freeze(
     let newest_epoch = oracle.newest_epoch(asset).ok_or(Error::Tier1CheckFailed)?;
     let now = env.ledger().timestamp();
 
-    // PR #27 review (round 2): deliberately no `first_epoch`/history
+    // Deliberately no `first_epoch`/history
     // requirement here, unlike `check_depeg`'s liquidity baseline.
     // Unlike that baseline, a sparse window here cannot produce a
     // FALSE trigger: `clawback_sum`/`revocation_sum` only accumulate
@@ -1175,8 +1206,8 @@ fn median(values: &Vec<i128>) -> i128 {
 
 /// design note Section 5. Returns the cure outcome for a Depeg event's
 /// cure window, `[proposed_at, proposed_at + challenge_secs)` by close
-/// time (review item D1).
-/// PR #15 review, finding F2: scans the cure window and records the
+/// time.
+/// Scans the cure window and records the
 /// result of every epoch whose disposition is currently Final or
 /// PermanentlyMissing into `event_id`'s own persisted `CureProgress`,
 /// merging with whatever was already recorded (recording is monotonic,
@@ -1228,14 +1259,14 @@ fn record_cure_progress(
     progress
 }
 
-/// design note Section 5, as amended by PR #15 review finding F2: the
+/// design note Section 5: the
 /// cure window, `[proposed_at, proposed_at + challenge_secs)` by close
-/// time (review item D1), is checked against PERSISTED progress
+/// time, is checked against PERSISTED progress
 /// (`record_cure_progress`), not a live re-scan alone, because the
 /// oracle's own ring only holds `RING_SLOTS` epochs — a cure-window
 /// epoch that becomes decidable while still inside the ring must be
 /// recorded before it rotates out, or a late `finalize` call
-/// misreads it as missing (finding F2's own worked example).
+/// misreads it as missing.
 ///
 /// Decision order: an already-recorded failure (missing or below
 /// threshold) declares immediately, even while other epochs are
@@ -1281,10 +1312,10 @@ fn cure_outcome(
 
 /// technical-doc.md Section 23 defaults, used when the asset has no
 /// registered definition of that kind (Section 9.4's own stated
-/// fallback rule).
-const DEFAULT_DEPEG_WINDOW_SECS: u64 = 259_200;
+/// fallback rule). Both windows are 72 epochs.
+const DEFAULT_DEPEG_WINDOW_SECS: u64 = 72 * EPOCH_SECS;
 const DEFAULT_DEPEG_THRESHOLD: i128 = 9_500_000;
-const DEFAULT_HALT_WINDOW_SECS: u64 = 259_200;
+const DEFAULT_HALT_WINDOW_SECS: u64 = 72 * EPOCH_SECS;
 
 enum DepegCheck {
     Clear,
@@ -1294,13 +1325,13 @@ enum DepegCheck {
 
 /// Section 5.9 S4/S5 (v1.5), R10: `RecentDepeg`'s own check across
 /// `[newest_epoch - window_epochs, newest_epoch]`, exactly ONE source
-/// per hour, and NEVER `HeldHour` (the footprint-fix review's own
-/// finding: `HeldHour` is a write-path, build/dispute-only concern,
-/// so the gate's own footprint never depends on how many disputes are
-/// open, only on the fixed set of keys below):
+/// per hour, and NEVER `HeldHour`: `HeldHour` is a write-path,
+/// build/dispute-only concern, so the gate's own footprint never
+/// depends on how many disputes are open, only on the fixed set of
+/// keys below):
 ///
 /// Each hour in the window is classified into exactly one of three
-/// buckets (review item, Section 5.9 S5):
+/// buckets (Section 5.9 S5):
 ///
 /// - **No signal**: `slot_for_epoch` returns `None` (before the
 ///   asset's own history, or a stale-slot gap it cannot verify), or

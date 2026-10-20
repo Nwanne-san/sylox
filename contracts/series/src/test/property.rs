@@ -392,7 +392,7 @@ proptest! {
                     let state_before = series.state();
                     let balance_before = series.balance(buyer);
                     if let Ok(Ok((filled, _premium))) =
-                        series.try_buy_cover(buyer, &amount, &max_rate)
+                        series.try_buy_cover(buyer, &amount, &max_rate, &series.premium_quote(&amount, &max_rate).1)
                     {
                         // I4: a real mint only ever happens in Open.
                         prop_assert_eq!(
@@ -617,8 +617,12 @@ fn shrunk_regression_from_the_one_time_unreproduced_core_property_failure() {
                 let buyer = &buyers[idx as usize];
                 let state_before = series.state();
                 let balance_before = series.balance(buyer);
-                if let Ok(Ok((filled, _premium))) = series.try_buy_cover(buyer, &amount, &max_rate)
-                {
+                if let Ok(Ok((filled, _premium))) = series.try_buy_cover(
+                    buyer,
+                    &amount,
+                    &max_rate,
+                    &series.premium_quote(&amount, &max_rate).1,
+                ) {
                     assert_eq!(
                         state_before,
                         SeriesState::Open,
@@ -793,7 +797,12 @@ fn run_i24_scenario(
     sync(&series);
     series.quote(&seller, &rate_bps, &seller_collateral);
     sync(&series);
-    let (filled, _premium) = series.buy_cover(&buyer, &buy_amount, &rate_bps);
+    let (filled, _premium) = series.buy_cover(
+        &buyer,
+        &buy_amount,
+        &rate_bps,
+        &series.premium_quote(&buy_amount, &rate_bps).1,
+    );
     sync(&series);
 
     let now_epoch = env.ledger().timestamp() / EPOCH_SECS;

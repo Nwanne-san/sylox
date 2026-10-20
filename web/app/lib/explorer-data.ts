@@ -1,9 +1,8 @@
 import { Networks, assetDisplayName, riskOracleClient } from "@sylox/sdk";
 import { al } from "./sylox-client";
 import { riskBandFor } from "./band";
+import { newestEffectiveFinalPegRatio } from "./asset-data";
 import type { RiskBand } from "@sylox/ui/risk-bands";
-
-const PEG_RATIO_SCALE = 10_000_000; // i128, scale 1e7 (lib/contracts/risk-oracle's own doc comment on peg_ratio).
 
 // RiskOracle.event_in_progress/asset_config have no al.oracle wrapper
 // (see lib/asset-data.ts's own top-of-file doc comment for the full
@@ -27,9 +26,18 @@ export interface ExplorerAssetRow {
   /** 0-100, or null when the contract has no score yet (brand-new asset, epoch 0). */
   score: number | null;
   /**
-   * latest(asset).peg_ratio, descaled to a plain decimal (e.g. 0.9998).
-   * Null when there's no posted signal yet (latest() returns None) - a
-   * brand-new asset reads this the same honest way score does.
+   * The newest EFFECTIVELY Final hour's peg_ratio, descaled to a plain
+   * decimal (e.g. 0.9998) - same walk over ring() the asset page's
+   * Confirmed card uses (see newestEffectiveFinalPegRatio in
+   * asset-data.ts), so both screens show the same number for the same
+   * asset. Never RiskOracle.latest(), which only covers the
+   * hourly-fallback posting path and reads back null for an asset
+   * currently on the sub-epoch path even when confirmed hours exist -
+   * that was this field's previous source, and the mismatch it caused
+   * (Explorer showing "—" while the asset page showed a real value) is
+   * exactly the bug this field's current implementation fixes. Null
+   * when there's genuinely no effectively-Final hour yet (brand-new
+   * asset) - this field reads the same honest way score does.
    */
   pegRatio: number | null;
   /**
@@ -73,7 +81,7 @@ function codeFromDisplayName(name: string, asset: string): string {
 async function fetchRow(asset: string): Promise<ExplorerAssetRow> {
   const oracle = oracleContract();
 
-  const [riskScore, staleTx, inProgressTx, latest, configTx, name] = await Promise.all([
+  const [riskScore, staleTx, inProgressTx, ring, configTx, name] = await Promise.all([
     // al.oracle.score() already throws a SyloxError on the contract's
     // Err case - the old isErr()-check-then-describe*Error pattern
     // isn't needed any more; letting it propagate here is caught by
@@ -82,7 +90,7 @@ async function fetchRow(asset: string): Promise<ExplorerAssetRow> {
     al.oracle.score(asset),
     oracle.check_stale({ asset }),
     oracle.event_in_progress({ asset }),
-    al.oracle.latest(asset),
+    al.oracle.ring(asset),
     oracle.asset_config({ asset }),
     assetDisplayName(Networks.Testnet, asset),
   ]);
@@ -90,7 +98,7 @@ async function fetchRow(asset: string): Promise<ExplorerAssetRow> {
   const staleResult = staleTx.result;
   const stale = staleResult.isErr() ? true : staleResult.unwrap();
 
-  const pegRatio = latest ? Number(latest.peg_ratio) / PEG_RATIO_SCALE : null;
+  const pegRatio = newestEffectiveFinalPegRatio(ring)?.pegRatio ?? null;
 
   const config = configTx.result;
   const homeDomain = config?.home_domain || null;
@@ -109,7 +117,7 @@ async function fetchRow(asset: string): Promise<ExplorerAssetRow> {
 }
 
 /**
- * Fetches every tracked asset's current risk band, score, latest peg
+ * Fetches every tracked asset's current risk band, score, current peg
  * value, staleness and event status straight from RiskOracle. Every
  * value here is a live contract read; nothing is computed or hardcoded
  * on the client side of what the contract itself reports.

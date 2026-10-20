@@ -10,9 +10,72 @@
 //! and `AGGREGATE_SLOTS_7D`, `MAX_CURE_EPOCHS`, the Depeg missing-epoch
 //! tolerance default, and the `challenge_secs` bound each lived as a
 //! private constant or bare literal in one contract's own crate. Both
-//! crates now import these from here instead.
-
+//! crates now import these from here instead. `EPOCH_SECS` itself was
+//! the same story (duplicated privately in `risk-oracle`,
+//! `event-registry` and `staking`): centralized here too, for the same
+//! reason and so the `demo-time` feature below has exactly one
+//! definition to scale.
+//!
+//! **The `demo-time` feature**: every window in this build is a fixed
+//! number of epochs (`RING_SLOTS`, `AGGREGATE_SLOTS_7D`,
+//! `MAX_CURE_EPOCHS`, and so on, none of which change below), built
+//! entirely out of how many SECONDS one epoch actually is. `EPOCH_SECS`
+//! and `SUB_EPOCH_GRID_SECS` are the only two constants in this whole
+//! module with a real "seconds" unit, and they are the only two this
+//! feature touches, both divided by the same factor (60) so their
+//! ratio - and every window expressed as a multiple of either one -
+//! comes out identical in both builds. A contract built with this
+//! feature plays through the exact same sequence of epochs and windows
+//! as the normal build, just over minutes instead of weeks, for a live
+//! demo deployment. It must never reach a real deployment: see
+//! `RiskOracle::demo_build()`.
+//!
+//! **Why 60, not the largest factor (300) that would still keep
+//! `SUB_EPOCH_GRID_SECS` a whole second.** Found by a real testnet
+//! run, not reasoned out in advance: `env.ledger().timestamp()`
+//! reflects the last CLOSED ledger's own close time, which lags real
+//! wall-clock time by up to one ledger-close interval (about 5-6s on
+//! testnet) at any given moment. At `EPOCH_SECS = 12` (factor 300),
+//! that lag is close enough to a full epoch that `post_signals`'
+//! own `check_epoch_window` genuinely rejected a real post as not
+//! yet closed, deploy/deploy.sh testnet-demo's own backfill loop
+//! computing against real wall-clock time slightly ahead of what the
+//! ledger itself would confirm. Factor 60 (`EPOCH_SECS = 60`) keeps a
+//! roughly 10x margin between one epoch and that lag, comfortable
+//! rather than knife-edge, at the cost of the real wait
+//! deploy/demo/scenario.sh's own history-building step needs scaling
+//! up by the same 5x (still far short of the real deployment's own
+//! multi-day wait).
+//!
+//! **Why `SUB_EPOCH_GRID_SECS` breaks from the same 60x factor
+//! (demo-time only).** Also found by a real testnet run:
+//! `Series::check_feed_not_behind` needs a sub-epoch posted within
+//! one `sub_epoch_secs` of now, and a single real post-and-confirm
+//! round trip against the public testnet RPC measured at a ~10.8s
+//! median, ~12.1s worst of 10 - longer than `SUB_EPOCH_GRID_SECS`
+//! would be at the same 60x factor as `EPOCH_SECS` (5s), so a post
+//! was already stale by the time it confirmed, deterministically,
+//! never a timing race retrying could win. `SUB_EPOCH_GRID_SECS =
+//! EPOCH_SECS` (60s, a 5x margin over that worst case) fixes it
+//! without slowing `EPOCH_SECS` itself and, with it, every other
+//! window (the history wait, the challenge window) that does not
+//! need to change. `Series::check_feed_not_behind` now reads
+//! `RiskOracle::sub_epoch_secs_at(asset, hour)`, the same per-hour
+//! resolver every internal RiskOracle read already used, so a
+//! governance change via `RiskOracle::set_sub_epoch_secs` takes effect
+//! for both builds the moment its own `effective_from_hour` arrives -
+//! this default is still what governs from hour zero, before any such
+//! change is ever made.
 use crate::network_limits::CONTRACT_DATA_ENTRY_SIZE_BYTES;
+
+/// One epoch, in seconds. technical-doc.md's own default throughout:
+/// the hourly ring, the Depeg/cure windows, and every bound below are
+/// all stated as a number of these. Scaled by the `demo-time` feature;
+/// see this module's own doc comment.
+#[cfg(not(feature = "demo-time"))]
+pub const EPOCH_SECS: u64 = 3_600;
+#[cfg(feature = "demo-time")]
+pub const EPOCH_SECS: u64 = 60;
 
 /// Number of slots in the per asset hourly ring buffer: the longest
 /// v1 depeg window (72h) plus the 7 day liquidity baseline before it,
@@ -31,8 +94,7 @@ pub const AGGREGATE_SLOTS_7D: u32 = 168;
 /// EPOCH_SECS`) a Depeg `EventDefinition` may register, 72 hours'
 /// worth. Keeps `CureProgress`'s own `recorded: u128` bitmap
 /// comfortably sized for every definition this build can register,
-/// with headroom to spare. technical-doc.md Section 8.8, PR #15
-/// review finding F3.
+/// with headroom to spare. technical-doc.md Section 8.8.
 pub const MAX_CURE_EPOCHS: u64 = 72;
 
 /// `EventDefinition.max_missing_epochs`'s own documented default for
@@ -42,14 +104,13 @@ pub const MAX_CURE_EPOCHS: u64 = 72;
 pub const DEPEG_MISSING_EPOCH_TOLERANCE_DEFAULT: u32 = 6;
 
 /// `challenge_secs` must be a whole number of epochs, at least one
-/// epoch long. technical-doc.md Section 8.8, PR #15 review finding
-/// F3.
+/// epoch long. technical-doc.md Section 8.8.
 pub const CHALLENGE_SECS_MIN_EPOCHS: u64 = 1;
 
 /// `challenge_secs` must be at most `MAX_CURE_EPOCHS` epochs long, so
 /// `CureProgress`'s `u128` bitmap always has room for every cure-window
 /// epoch a registered definition could need. technical-doc.md Section
-/// 8.8, PR #15 review finding F3.
+/// 8.8.
 pub const CHALLENGE_SECS_MAX_EPOCHS: u64 = MAX_CURE_EPOCHS;
 
 /// Fixed number of slots in the per asset sub-epoch ring, `Sub(asset)`.
@@ -66,8 +127,28 @@ pub const SUB_RING_SLOTS: u32 = 60;
 /// Section 5.9 S3. Every allowed `sub_epoch_secs` value is a multiple
 /// of this, so every sub-epoch's own start time always falls exactly
 /// on this grid, and a `sub_epoch_secs` change never needs to
-/// re-encode `Sub(asset)`.
+/// re-encode `Sub(asset)`. Scaled by the `demo-time` feature, by the
+/// same factor as `EPOCH_SECS`; see this module's own doc comment.
+#[cfg(not(feature = "demo-time"))]
 pub const SUB_EPOCH_GRID_SECS: u64 = 300;
+#[cfg(feature = "demo-time")]
+pub const SUB_EPOCH_GRID_SECS: u64 = 60;
+
+/// Build-time check (normal build only): `EPOCH_SECS` is exactly 12
+/// `SUB_EPOCH_GRID_SECS` units - the "in proportion" property every
+/// other window in this module (and every contract's own window built
+/// as a multiple of either constant) rests on. The demo-time build
+/// breaks this exact ratio on purpose (see this module's own doc
+/// comment on why `SUB_EPOCH_GRID_SECS` cannot stay at 60x there) and
+/// checks only that `EPOCH_SECS` is a whole multiple of
+/// `SUB_EPOCH_GRID_SECS` instead - still everything
+/// `SUB_EPOCH_SECS_ALLOWED`-style per-hour arithmetic
+/// (`EPOCH_SECS / SUB_EPOCH_GRID_SECS` sub-epochs per hour) needs,
+/// just not tied to the number 12 specifically.
+#[cfg(not(feature = "demo-time"))]
+const _: () = assert!(EPOCH_SECS == 12 * SUB_EPOCH_GRID_SECS);
+#[cfg(feature = "demo-time")]
+const _: () = assert!(EPOCH_SECS.is_multiple_of(SUB_EPOCH_GRID_SECS));
 
 /// `sylox_types::assets::RingSlot`'s own packed width in `risk-oracle`
 /// and `Sub(asset)`'s own packed slot width (same encoding, Section
@@ -125,7 +206,7 @@ pub const MAX_DEPEG_WINDOW_EPOCHS: u64 = (RING_SLOTS - AGGREGATE_SLOTS_7D) as u6
 /// Set at `MAX_DEPEG_WINDOW_EPOCHS + 1 = 73`: the structural maximum
 /// a Depeg definition's own window can ever produce (one more than
 /// `MAX_DEPEG_WINDOW_EPOCHS`, for `depeg_check`'s own inclusive loop
-/// bound). Review finding: this means `UnbuiltBacklog` can NEVER
+/// bound). This means `UnbuiltBacklog` can NEVER
 /// actually be reached while `register_definition` enforces
 /// `MAX_DEPEG_WINDOW_EPOCHS` (no registered definition, nor the
 /// default window, can ever produce more than this many unbuilt
@@ -175,3 +256,23 @@ pub const MAX_UNBUILT_HOURS_SCANNED_BY_COVER_GATE: u32 = 73;
 /// guard against a regression here.
 const _: () =
     assert!(MAX_UNBUILT_HOURS_SCANNED_BY_COVER_GATE as u64 == MAX_DEPEG_WINDOW_EPOCHS + 1);
+
+/// The normal build's own `EPOCH_SECS`/`SUB_EPOCH_GRID_SECS` stay at
+/// their real, technical-doc.md values and in the strict 12x ratio
+/// the build-time assertion above checks - only the demo-time build
+/// breaks that ratio (see this module's own doc comment on why
+/// `SUB_EPOCH_GRID_SECS` cannot follow `EPOCH_SECS`'s scale there). A
+/// `const` assertion already enforces the ratio in both builds, but
+/// this test guards the actual real-world NUMBERS the normal build
+/// ships with, which nothing else here checks and a ratio-preserving
+/// change to both at once would not catch.
+#[cfg(all(test, not(feature = "demo-time")))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn normal_build_keeps_its_own_real_epoch_and_sub_epoch_seconds() {
+        assert_eq!(EPOCH_SECS, 3_600);
+        assert_eq!(SUB_EPOCH_GRID_SECS, 300);
+    }
+}

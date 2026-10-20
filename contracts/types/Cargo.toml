@@ -14,3 +14,9 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+demo-time = []
+# Test-only helpers (`ttl_check`) for the contract crates' own tests;
+# never part of a contract build.
+testutils = ["soroban-sdk/testutils"]

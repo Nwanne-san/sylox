@@ -36,6 +36,18 @@ export function AssetPageClient({ asset }: { asset: string }) {
     };
   }, [asset]);
 
+  // The breadcrumb's own trailing label: the real asset code once the
+  // header has loaded (matching the page's own <h1> and the event
+  // page's breadcrumb - see EventPageClient.tsx's assetCode usage),
+  // falling back to the shortened contract address while loading, on a
+  // header-section error, or on a page-wide load failure - every state
+  // where there's genuinely no code to show yet.
+  const shortAddress = `${asset.slice(0, 4)}…${asset.slice(-4)}`;
+  const assetCode =
+    state.status === "ready" && state.data.header.status === "ok"
+      ? state.data.header.value.code
+      : shortAddress;
+
   return (
     <DashboardShell title="Asset">
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-16 md:px-16 md:py-24">
@@ -45,7 +57,7 @@ export function AssetPageClient({ asset }: { asset: string }) {
           <Breadcrumb
             items={[
               { label: "Explorer", href: "/" },
-              { label: `${asset.slice(0, 4)}…${asset.slice(-4)}` },
+              { label: assetCode },
             ]}
           />
         </div>
@@ -213,9 +225,18 @@ function ConfirmedLiveSection({ data }: { data: AssetPageData }) {
               )}
               {data.confirmed.value.latestPending !== null && (
                 <p className="mt-3 border-t border-cement-grey/30 pt-3 font-mono text-xs text-cyber-tin">
-                  Latest hour: {data.confirmed.value.latestPending.pegRatio.toFixed(4)} peg, can
-                  still be challenged until{" "}
-                  {formatChallengeDeadline(data.confirmed.value.latestPending.pendingUntil)}.
+                  {data.confirmed.value.latestPending.pendingUntil === null ? (
+                    <>
+                      Latest hour: {data.confirmed.value.latestPending.pegRatio.toFixed(4)} peg,
+                      provisional while its sub-epochs are still posting.
+                    </>
+                  ) : (
+                    <>
+                      Latest hour: {data.confirmed.value.latestPending.pegRatio.toFixed(4)} peg, can
+                      still be challenged until{" "}
+                      {formatChallengeDeadline(data.confirmed.value.latestPending.pendingUntil)}.
+                    </>
+                  )}
                 </p>
               )}
             </>

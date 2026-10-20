@@ -61,6 +61,11 @@ const CONTRACT_VERSION: u32 = 1;
 /// migrated to" marker.
 const MIGRATED_TO_KEY: Symbol = symbol_short!("MIGRATE");
 
+/// `set_governor`'s own one-time lock, same shape as EventRegistry's
+/// `FACTORY_SET_KEY`: absent until the first successful `set_governor`
+/// call, then permanently present, so a second call always fails.
+const GOVERNOR_SET_KEY: Symbol = symbol_short!("GOV_SET");
+
 #[contractimpl]
 impl MarketFactory {
     /// Issue #21, #66: a constructor, not a separate `initialize`
@@ -311,6 +316,25 @@ impl MarketFactory {
         sylox_types::ttl::extend_instance(&env);
         config.series_wasm = hash;
         storage::set_config(&env, &config);
+        Ok(())
+    }
+
+    /// One-time governor handover, for the Governor deployment cutover:
+    /// callable only by the CURRENT governor, exactly once. Same
+    /// one-time-lock pattern as `EventRegistry::set_factory` (a storage
+    /// flag checked before the write, set after it), so a second call
+    /// always fails rather than letting the governor be reassigned
+    /// again later through this same path.
+    pub fn set_governor(env: Env, new_admin: Address) -> Result<(), Error> {
+        let mut config = Self::require_config(&env)?;
+        config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
+        if env.storage().instance().has(&GOVERNOR_SET_KEY) {
+            return Err(Error::GovernorAlreadySet);
+        }
+        config.governor = new_admin;
+        storage::set_config(&env, &config);
+        env.storage().instance().set(&GOVERNOR_SET_KEY, &true);
         Ok(())
     }
 

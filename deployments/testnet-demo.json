@@ -1,0 +1,46 @@
+{
+  "network": "testnet-demo",
+  "passphrase": "Test SDF Network ; September 2015",
+  "rpc_url": "https://soroban-testnet.stellar.org",
+  "deployed_at": "2026-10-16T05:38:40Z",
+  "git_commit": "ad436ca96fb047e221b5ace34617e8fc4c7ea2c6",
+  "stellar_cli_version": "28.1.0",
+  "constructor_nonce": "sylox-demo-time-v14",
+  "demo_time": { "epoch_secs": 60, "window_secs": 4320 },
+  "contracts": {
+    "risk_oracle": { "id": "CCDLCSYIL37JQHYRZYK44EGQ74G464BBAO3K5OVDT4OGGEAXO34CRXHI", "wasm_hash": "3373f6529ea69e59accdf3b465c6cc98ab72775cfc5231e9214e1dcf2aa7a6e6", "wasm_size": 91506, "salt": "c6727bc6c060c7e857110eb79d3423b74a0580dd2a41fbb0f357564c7b569702" },
+    "staking": { "id": "CDXMQ22RNRWFZLQ2M5GNDSMRSTN7XYK6YOVM7UZHJHIE63W3BUQ2YM4C", "wasm_hash": "b3b5257d6dfde8e40353f2cc420bca3fd3657b0bc5dd66ef064868c807dbaae8", "wasm_size": 47528, "salt": "9141b4bc438c61f034b86d308c0e8d97659bbfe93e47dc20e7fcfa30aa879898" },
+    "treasury": { "id": "CAYU3C5V3SMVLKVIY3SIG64K7HO57YSV6STGDBE7G2AJGSVT45DFKUI4", "wasm_hash": "2cd1c5a5d7975a81c9e46776b31ea524c1b45f00b173ec1b63e32078bb736995", "wasm_size": 14101, "salt": "175e8d393a069b0567a50e123d9d76cf8d7845a30f5ee81193634c5d5abd8b1c" },
+    "event_registry": { "id": "CCWDOXZEWUYN7DDW6MDR6AGIQOKFF3KUICX6HCMF3KJSQRB3CHLZT63D", "wasm_hash": "ee28c2a4c9a3978bc0b89610ad4866f994b134a721b8247491b049d4719fbcda", "wasm_size": 49091, "salt": "6f060a41336909e59d4b967ea39d71e12fd27eab491daed80fd30c8660e566f4" },
+    "market_factory": { "id": "CDEWIAKEO2NA4QGQXHFKOZ7OQKMIIDBQO4HUIXQFBGL6F7U376CS3LXU", "wasm_hash": "d5aba0faa5f2b267e18fd115aa002fc00eb56184cc41b289cd603cf581680057", "wasm_size": 22898, "salt": "e360ae96107b49cafed3209c163114a2bb400bba488393f98c3c4d960c0afd55" }
+  },
+  "series_wasm_hash": "0238ea606d1ea803f31b9e1f6390cc110a622944c36fe6b66276f5c290625426",
+  "dmusd": {
+    "contract_id": "CC5SO3C6JZ2GXHV3FAOTLBXQM5DUJBVXEOKSB3YFB6244SFKL64FN5RN",
+    "asset_code": "DMUSD",
+    "issuer": "GB7EJA46JF6KSOFS5RRBJH5CAZ2QJAIDPJQHXLR3SW52JMU5AY2J3QPW",
+    "note": "Test-only demo collateral. Never real money. Never call this USDC."
+  },
+  "dmfrz": {
+    "contract_id": "CCEQHHZES5IE4QVNNIXMELOOFWQXWZA2QFLIPK5NFFU5V3PUVDHU52C5",
+    "asset_code": "DMFRZ",
+    "issuer": "GALBEDQYIFRMSP5IPMLWUUDQBXNFXXWSMEP22AZCTLCADE2XLMO7JRL3",
+    "note": "The one asset this deployment tracks: real AUTH_REVOCABLE and CLAWBACK_ENABLED issuer flags, for deploy/demo/scenario.sh's own real IssuerFreeze trigger. Never real money."
+  },
+  "series": {
+    "contract_id": "CATN3QKM4VHOHPN2JU7AIRCJOQZWPEXA7CNZBG6SYHTTOAMGOMBQ3BU3",
+    "asset": "CCEQHHZES5IE4QVNNIXMELOOFWQXWZA2QFLIPK5NFFU5V3PUVDHU52C5",
+    "settlement": "CC5SO3C6JZ2GXHV3FAOTLBXQM5DUJBVXEOKSB3YFB6244SFKL64FN5RN",
+    "start": 1792129108,
+    "expiry": 1792159348,
+    "claim_window_secs": 600
+  },
+  "seed_epoch": 29868678,
+  "identities": {
+    "deployer": "GA22EOO5PK3ITEP5RYPKXE6MJSBHJLKB2AYV2D5RTCKJSIISWRUDJL44",
+    "admin": "GBLBFECZINS4PRHONSJLITC7HJJKHCT2H2ST2PBOHB2MLFDHTND5XJZG",
+    "issuer": "GB7EJA46JF6KSOFS5RRBJH5CAZ2QJAIDPJQHXLR3SW52JMU5AY2J3QPW",
+    "asset_issuer": "GALBEDQYIFRMSP5IPMLWUUDQBXNFXXWSMEP22AZCTLCADE2XLMO7JRL3",
+    "keeper": "GCG7GFQ5YRJTIVMSJCJKBUEPY7O64C4QVRTYPQMJQXVN22R6IJ7DJATA"
+  }
+}

@@ -135,6 +135,224 @@ fn changing_sub_epoch_secs_takes_effect_only_at_the_next_hour_boundary() {
     );
 }
 
+/// What `sub_epoch_config` says is in force for `hour`: the pending
+/// value from `effective_from_hour` on, the current value before it.
+fn in_force_per_config(cfg: &sylox_types::SubEpochConfig, hour: u64) -> u64 {
+    match (cfg.pending_sub_epoch_secs, cfg.effective_from_hour) {
+        (Some(pending), Some(from)) if hour >= from => pending,
+        _ => cfg.sub_epoch_secs,
+    }
+}
+
+/// `sub_epoch_secs_at` and `sub_epoch_config` agree for every hour
+/// around each change, before any change, while one is pending, and
+/// once it is in force.
+#[test]
+fn sub_epoch_config_and_sub_epoch_secs_at_agree() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+    let hour = REALISTIC_EPOCH_BASE;
+    let check = |label: &str| {
+        let cfg = fx.client.sub_epoch_config(&asset);
+        for h in hour - 2..hour + 6 {
+            let expected = cfg
+                .as_ref()
+                .map(|c| in_force_per_config(c, h))
+                .unwrap_or(SUB_EPOCH_SECS_DEFAULT);
+            assert_eq!(
+                fx.client.sub_epoch_secs_at(&asset, &h),
+                expected,
+                "{label}, hour {h}"
+            );
+        }
+    };
+
+    env.ledger().set_timestamp(hour * EPOCH_SECS + 60);
+    check("no config yet");
+    fx.client.set_sub_epoch_secs(&asset, &600);
+    check("600 pending");
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &hour), 300);
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &(hour + 1)), 600);
+
+    env.ledger().set_timestamp((hour + 2) * EPOCH_SECS + 60);
+    check("600 in force");
+    env.ledger()
+        .set_timestamp((hour + 1 + 240) * EPOCH_SECS + 60);
+    fx.client.set_sub_epoch_secs(&asset, &900);
+    check("900 pending after 600 took effect");
+}
+
+/// A second change 239 hours after the first took effect is rejected:
+/// hours from before the first change could still be read, and the one
+/// stored transition can't describe both.
+#[test]
+fn a_second_change_239_hours_after_the_first_takes_effect_is_rejected() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+    let hour = REALISTIC_EPOCH_BASE;
+
+    env.ledger().set_timestamp(hour * EPOCH_SECS + 60);
+    fx.client.set_sub_epoch_secs(&asset, &600);
+    let took_effect = hour + 1;
+
+    env.ledger()
+        .set_timestamp((took_effect + 239) * EPOCH_SECS + 3_599);
+    assert_eq!(
+        fx.client.try_set_sub_epoch_secs(&asset, &900),
+        Err(Ok(crate::Error::SubEpochChangeTooSoon))
+    );
+    let cfg = fx.client.sub_epoch_config(&asset).unwrap();
+    assert_eq!(cfg.pending_sub_epoch_secs, Some(600), "config unchanged");
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &hour), 300);
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &took_effect), 600);
+}
+
+/// At 240 hours the second change is accepted. The length in force is
+/// promoted to current, the hour of the change and those after the first
+/// change keep 600, the next hour gets 900, and the hours before the
+/// first change resolve to 600 only now that they are over 240 hours
+/// old (before the second change they still resolved to 300).
+#[test]
+fn at_240_hours_a_second_change_is_accepted_and_old_hours_resolve_correctly() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+    let keeper = Address::generate(&env);
+    let hour = REALISTIC_EPOCH_BASE;
+
+    env.ledger().set_timestamp(hour * EPOCH_SECS + 60);
+    fx.client.set_sub_epoch_secs(&asset, &600);
+    let took_effect = hour + 1;
+    let second_hour = took_effect + 240;
+
+    // Sub 0 of the second change's hour, at 600, before the change.
+    post_sub(
+        &env,
+        &fx.client,
+        &keeper,
+        &asset,
+        second_hour,
+        0,
+        600,
+        10_000_000,
+    );
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &hour), 300);
+    fx.client.set_sub_epoch_secs(&asset, &900);
+
+    let cfg = fx.client.sub_epoch_config(&asset).unwrap();
+    assert_eq!(
+        cfg.sub_epoch_secs, 600,
+        "the value in force is promoted to current"
+    );
+    assert_eq!(cfg.pending_sub_epoch_secs, Some(900));
+    assert_eq!(cfg.effective_from_hour, Some(second_hour + 1));
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &took_effect), 600);
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &second_hour), 600);
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &(second_hour + 1)), 900);
+    assert!(
+        second_hour - hour > 240,
+        "the pre-change hour is over 240 hours old"
+    );
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &hour), 600);
+
+    // The rest of the current hour is still addressed at 600: sub 1
+    // covers [600, 1200), and `live` reads it back as sub 1.
+    post_sub(
+        &env,
+        &fx.client,
+        &keeper,
+        &asset,
+        second_hour,
+        1,
+        600,
+        10_000_000,
+    );
+    let (live, _, _) = fx.client.live(&asset).unwrap();
+    assert_eq!((live.hour, live.sub), (second_hour, 1));
+
+    // The next hour uses 900: four sub-epochs, sub 3 the last.
+    post_sub(
+        &env,
+        &fx.client,
+        &keeper,
+        &asset,
+        second_hour + 1,
+        3,
+        900,
+        10_000_000,
+    );
+    let (live, _, _) = fx.client.live(&asset).unwrap();
+    assert_eq!((live.hour, live.sub), (second_hour + 1, 3));
+}
+
+/// A change still pending may be replaced, in the same hour, as often
+/// as needed; the length in force for the current hour is untouched.
+#[test]
+fn replacing_a_still_pending_change_works() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+    let hour = REALISTIC_EPOCH_BASE;
+
+    env.ledger().set_timestamp(hour * EPOCH_SECS + 60);
+    fx.client.set_sub_epoch_secs(&asset, &600);
+    env.ledger().set_timestamp(hour * EPOCH_SECS + 3_000);
+    fx.client.set_sub_epoch_secs(&asset, &900);
+    fx.client.set_sub_epoch_secs(&asset, &1_800);
+
+    let cfg = fx.client.sub_epoch_config(&asset).unwrap();
+    assert_eq!(cfg.sub_epoch_secs, 300);
+    assert_eq!(cfg.pending_sub_epoch_secs, Some(1_800));
+    assert_eq!(cfg.effective_from_hour, Some(hour + 1));
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &hour), 300);
+    assert_eq!(fx.client.sub_epoch_secs_at(&asset, &(hour + 1)), 1_800);
+}
+
+/// Section 5.9 S1: an hour is resolved with the length it was posted at,
+/// at any age. Hour H is posted at 300 while a change to 900 is pending
+/// for H + 1, left unbuilt, and a second change (to 600) lands 293 hours
+/// later, promoting 900 over the config's history. Building H then must
+/// still use 300 and roll up all 12 of its sub-epochs; resolved through
+/// the config alone it would read H at 900 and roll up only 4.
+#[test]
+fn an_old_unbuilt_hour_builds_with_the_length_it_was_posted_at() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+    let keeper = Address::generate(&env);
+    let hour = REALISTIC_EPOCH_BASE;
+
+    env.ledger().set_timestamp(hour * EPOCH_SECS + 60);
+    fx.client.set_sub_epoch_secs(&asset, &900);
+    let mut sum: i128 = 0;
+    for sub in 0..12u32 {
+        let peg = 9_000_000 + sub as i128 * 10_000;
+        sum += peg;
+        post_sub(&env, &fx.client, &keeper, &asset, hour, sub, 300, peg);
+    }
+    assert!(!fx.client.is_final(&asset, &hour), "left unbuilt");
+
+    env.ledger()
+        .set_timestamp(hour * EPOCH_SECS + 293 * EPOCH_SECS);
+    fx.client.set_sub_epoch_secs(&asset, &600);
+    let cfg = fx.client.sub_epoch_config(&asset).unwrap();
+    assert_eq!(
+        cfg.sub_epoch_secs, 900,
+        "900 promoted over the original 300"
+    );
+    assert_eq!(
+        fx.client.sub_epoch_secs_at(&asset, &hour),
+        300,
+        "recorded at its first post"
+    );
+
+    fx.client.build_hour(&asset, &hour);
+    assert!(fx.client.is_final(&asset, &hour));
+    let built = fx.client.signals(&asset, &hour).unwrap();
+    assert_eq!(
+        built.peg_ratio,
+        sum / 12,
+        "every one of the 12 sub-epochs rolled up"
+    );
+}
+
 /// S2: an hour is posted through exactly one path; a sub-epoch post
 /// against an hour already posted through the hourly fallback is
 /// rejected, and the reverse.
@@ -572,6 +790,122 @@ fn build_hour_writes_empty_below_min_sub_coverage_bps() {
     );
 }
 
+/// `SCORE_STALE_AFTER_EPOCHS` (not exported; mirrors this module's own
+/// `SIGNAL_DISPUTE_SECS` comment at the top of the file): an asset
+/// whose newest Final hour was built through the sub-epoch path, not
+/// posted via the hourly fallback, reads fresh at the normal
+/// structural lag that path carries (hour close, then the last
+/// sub-epoch's own dispute window, then the time it takes a build to
+/// land) and stale once that lag exceeds it - the exact gap this
+/// revision's own `SCORE_STALE_AFTER_EPOCHS` was sized to cover.
+/// Builds 168 epochs of real history through the cheap hourly
+/// fallback path, then builds ONE further hour through sub-epochs
+/// (the realistic shape: an asset that historically posted hourly,
+/// like testnet USDC before the live poster's own build_hour fix),
+/// and checks `score().stale` on both sides of the boundary against
+/// that sub-epoch-built hour specifically, not an hourly one.
+#[test]
+fn score_reads_fresh_then_stale_for_a_sub_epoch_built_hour_at_the_score_threshold() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+    let keeper = Address::generate(&env);
+
+    // 168 epochs of ordinary hourly-fallback history, so scoring is
+    // already active by the time the sub-epoch-built hour under test
+    // arrives (same baseline every other test in this suite uses).
+    super::fill_ring_with_constant_signal(
+        &env,
+        &fx.client,
+        &fx.staking,
+        &asset,
+        168,
+        9_900_000,
+        500_000_000_000,
+    );
+
+    let hour = 170u64;
+    let sub_epoch_secs = SUB_EPOCH_SECS_DEFAULT;
+    let per_hour = (EPOCH_SECS / sub_epoch_secs) as u32; // 12
+    for sub in 0..per_hour {
+        post_sub(
+            &env,
+            &fx.client,
+            &keeper,
+            &asset,
+            hour,
+            sub,
+            sub_epoch_secs,
+            9_900_000,
+        );
+    }
+    // The hour's own close, plus the last sub-epoch's dispute window:
+    // exactly the moment build_hour can first succeed.
+    let built_at = sub_start(hour, per_hour - 1, sub_epoch_secs) + sub_epoch_secs + 7_200 + 1;
+    env.ledger().set_timestamp(built_at);
+    fx.client.build_hour(&asset, &hour);
+    assert!(fx.client.is_final(&asset, &hour));
+    assert_eq!(
+        fx.client.score(&asset).epoch,
+        hour,
+        "score must have advanced to this sub-epoch-built hour"
+    );
+    assert!(
+        !fx.client.score(&asset).stale,
+        "fresh immediately after the sub-epoch-built hour lands Final"
+    );
+
+    // SCORE_STALE_AFTER_EPOCHS (5, not exported - see this test's own
+    // doc comment): current_epoch - hour > 5 is the real condition;
+    // one epoch before that boundary must still read fresh.
+    env.ledger().set_timestamp((hour + 5) * EPOCH_SECS);
+    assert!(
+        !fx.client.score(&asset).stale,
+        "must still read fresh exactly at the SCORE_STALE_AFTER_EPOCHS boundary"
+    );
+
+    env.ledger().set_timestamp((hour + 6) * EPOCH_SECS + 1);
+    assert!(
+        fx.client.score(&asset).stale,
+        "must read stale once the gap exceeds SCORE_STALE_AFTER_EPOCHS"
+    );
+}
+
+/// The same boundary as above, but for an hourly-posted asset (no
+/// sub-epochs at all), proving `SCORE_STALE_AFTER_EPOCHS` applies
+/// identically regardless of which posting path produced the newest
+/// Final hour - this revision changes the threshold's VALUE, never
+/// makes it path dependent.
+#[test]
+fn score_reads_fresh_then_stale_for_an_hourly_posted_asset_at_the_score_threshold() {
+    let env = Env::default();
+    let (fx, asset) = setup_with_asset(&env);
+
+    super::fill_ring_with_constant_signal(
+        &env,
+        &fx.client,
+        &fx.staking,
+        &asset,
+        169,
+        9_900_000,
+        500_000_000_000,
+    );
+    let last_epoch = fx.client.score(&asset).epoch;
+    assert!(!fx.client.score(&asset).stale);
+
+    env.ledger().set_timestamp((last_epoch + 5) * EPOCH_SECS);
+    assert!(
+        !fx.client.score(&asset).stale,
+        "must still read fresh exactly at the SCORE_STALE_AFTER_EPOCHS boundary"
+    );
+
+    env.ledger()
+        .set_timestamp((last_epoch + 6) * EPOCH_SECS + 1);
+    assert!(
+        fx.client.score(&asset).stale,
+        "must read stale once the gap exceeds SCORE_STALE_AFTER_EPOCHS"
+    );
+}
+
 /// S4, I23: a sub-epoch resolved Overturned never contributes to the
 /// built hour, and the hour still builds correctly from the remaining
 /// Final sub-epochs.
@@ -724,7 +1058,8 @@ fn a_dispute_outliving_the_ring_upheld_at_day_6_still_builds_final_with_all_12()
     // inside SIGNAL_DISPUTE_RULING_SECS's 6 day deadline), upholding
     // the keeper.
     env.ledger()
-        .set_timestamp(sub_start(hour, 0, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400);
+        // One second inside the ruling deadline (D2: a ruling at the deadline itself is rejected).
+        .set_timestamp(sub_start(hour, 0, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400 - 1);
     client.resolve_sub_signal_dispute(&asset, &hour, &0u32, &true, &dummy_hash(&env));
 
     assert!(
@@ -813,7 +1148,8 @@ fn a_dispute_outliving_the_ring_overturned_at_day_6_builds_from_the_other_11() {
     assert!(!client.is_final(&asset, &hour));
 
     env.ledger()
-        .set_timestamp(sub_start(hour, 0, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400);
+        // One second inside the ruling deadline (D2: a ruling at the deadline itself is rejected).
+        .set_timestamp(sub_start(hour, 0, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400 - 1);
     // Disputer wins: sub 0 is overturned. The hour does NOT build yet
     // (Section 5.9 S2, footprint-fix revision): sub 0 is now
     // AwaitingRepost, not PermanentlyMissing, since its own repost
@@ -973,7 +1309,8 @@ fn a_slow_ruling_repost_lands_in_heldhour_and_the_hour_builds_corrected() {
     // The ruling lands at day 6, well past the ring's own 5 hour span
     // AND past sub 0's own original close + sub_backfill_secs.
     env.ledger()
-        .set_timestamp(sub_start(hour, 0, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400);
+        // One second inside the ruling deadline (D2: a ruling at the deadline itself is rejected).
+        .set_timestamp(sub_start(hour, 0, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400 - 1);
     client.resolve_sub_signal_dispute(&asset, &hour, &0u32, &false, &dummy_hash(&env));
     assert!(!client.is_final(&asset, &hour));
 
@@ -1457,7 +1794,8 @@ fn two_disputes_in_the_same_hour_resolve_independently() {
     assert!(!client.is_final(&asset, &hour));
 
     env.ledger()
-        .set_timestamp(sub_start(hour, 1, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400);
+        // One second inside the ruling deadline (D2: a ruling at the deadline itself is rejected).
+        .set_timestamp(sub_start(hour, 1, sub_epoch_secs) + sub_epoch_secs + 6 * 86_400 - 1);
     // Sub 0 upheld (keeper wins); the hour must still wait on sub 1.
     client.resolve_sub_signal_dispute(&asset, &hour, &0u32, &true, &dummy_hash(&env));
     assert!(
@@ -1542,6 +1880,657 @@ fn budget_dispute_copy_out_at_the_300s_default() {
         resources.write_bytes < sylox_types::network_limits::CONTRACT_DATA_ENTRY_SIZE_BYTES as u32,
         "HeldHour's own entry (at most 12 HeldSubSlot-sized rows) must fit a single ledger entry"
     );
+}
+
+/// A fixture for the history-TTL tests below: a registered
+/// `MockGovernor` and `MockStaking`, one keeper per sub-epoch, and an
+/// `at` that moves time and ledger sequence together (5 seconds per
+/// ledger), so TTLs are checked against real elapsed time.
+struct TtlFx<'a> {
+    env: &'a Env,
+    client: RiskOracleClient<'a>,
+    contract_id: Address,
+    staking: crate::mocks::MockStakingClient<'a>,
+    governor: Address,
+    committee: Address,
+    asset: Address,
+    keepers: std::vec::Vec<Address>,
+    disputer: Address,
+}
+
+extern crate std;
+
+const TTL_HOUR: u64 = REALISTIC_EPOCH_BASE;
+
+impl<'a> TtlFx<'a> {
+    fn new(env: &'a Env) -> Self {
+        env.mock_all_auths();
+        let staking = env.register(crate::mocks::MockStaking, ());
+        let governor = env.register(MockGovernor, ());
+        let contract_id = env.register(
+            RiskOracle,
+            (governor.clone(), Address::generate(env), staking.clone()),
+        );
+        let client = RiskOracleClient::new(env, &contract_id);
+        let asset = Address::generate(env);
+        client.add_asset(&super::asset_config(env, &asset, &Address::generate(env)));
+        let per_hour = (EPOCH_SECS / SUB_EPOCH_SECS_DEFAULT) as usize;
+        TtlFx {
+            env,
+            client,
+            contract_id,
+            staking: crate::mocks::MockStakingClient::new(env, &staking),
+            governor,
+            committee: Address::generate(env),
+            asset,
+            keepers: (0..per_hour).map(|_| Address::generate(env)).collect(),
+            disputer: Address::generate(env),
+        }
+    }
+
+    fn at(&self, t: u64) {
+        self.env.ledger().set_timestamp(t);
+        self.env.ledger().set_sequence_number((t / 5) as u32);
+        // MockGovernor keeps its committee in temporary storage, which
+        // the test host expires as the ledger ages (test setup only).
+        crate::mocks::MockGovernorClient::new(self.env, &self.governor)
+            .set_committee(&self.committee);
+    }
+
+    fn signals(&self, peg_ratio: i128, tag: u8) -> sylox_types::SignalSet {
+        let mut s = signal_set(self.env, TTL_HOUR, peg_ratio);
+        s.liquidity_2pct = 500_000_000_000;
+        s.supply_change_bps = 0;
+        s.inputs_hash = soroban_sdk::BytesN::from_array(self.env, &[tag; 32]);
+        s
+    }
+
+    /// Every sub-epoch of the hour at its own close, sub 0 wrong. Each
+    /// gets inputs hash `[sub + 1; 32]`.
+    fn post_hour(&self) {
+        for sub in 0..self.keepers.len() as u32 {
+            self.at(sub_start(TTL_HOUR, sub, SUB_EPOCH_SECS_DEFAULT) + SUB_EPOCH_SECS_DEFAULT);
+            let peg_ratio = if sub == 0 { 1 } else { 10_000_000 };
+            self.client.post_sub_signals(
+                &self.keepers[sub as usize],
+                &self.asset,
+                &TTL_HOUR,
+                &sub,
+                &self.signals(peg_ratio, sub as u8 + 1),
+            );
+        }
+    }
+
+    fn sub_signals_ttl(&self, sub: u32) -> u32 {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        let key = crate::storage::DataKey::SubSignals(self.asset.clone(), TTL_HOUR, sub);
+        self.env.as_contract(&self.contract_id, || {
+            self.env.storage().persistent().get_ttl(&key)
+        })
+    }
+}
+
+/// The longest wait the code can reach today on one contested
+/// sub-epoch: a second dispute cycle needs the repost to land in
+/// `Sub(asset)`'s ring (a held repost can't be disputed), so the first
+/// ruling must come within the ring's 5 hour span; the repost's dispute
+/// then times out as late as `SubDispute` lives. The hour builds about
+/// 7.2 days after its first post, with every sibling still live, the
+/// full inputs hash, and every keeper behind a Final sub-epoch paid.
+#[test]
+fn a_double_contested_hour_builds_in_full_at_a_late_timeout_about_7_2_days_later() {
+    use soroban_sdk::{Bytes, BytesN};
+
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let hour = TTL_HOUR;
+    let per_hour = fx.keepers.len() as u32;
+    fx.post_hour();
+    let first_post = sub_start(hour, 0, SUB_EPOCH_SECS_DEFAULT) + SUB_EPOCH_SECS_DEFAULT;
+    let ring_span_end = sub_start(hour, 0, SUB_EPOCH_SECS_DEFAULT) + crate::SUB_RING_SPAN_SECS;
+
+    // Cycle 1: disputed at the hour's close, overturned late enough that
+    // the repost only just lands in the ring.
+    fx.at(hour_close(hour));
+    fx.client
+        .dispute_sub_signals(&fx.disputer, &fx.asset, &hour, &0u32, &dummy_hash(&env));
+    fx.at(ring_span_end - 1_200);
+    fx.client
+        .resolve_sub_signal_dispute(&fx.asset, &hour, &0u32, &false, &dummy_hash(&env));
+
+    // Cycle 2: the repost, disputed, then timed out as late as
+    // `SubDispute` (the ruling window plus 1 day) still allows.
+    let reposter = Address::generate(&env);
+    fx.at(ring_span_end - 600);
+    fx.client.post_sub_signals(
+        &reposter,
+        &fx.asset,
+        &hour,
+        &0u32,
+        &fx.signals(10_000_000, 100),
+    );
+    let redisputed_at = ring_span_end - 540;
+    fx.at(redisputed_at);
+    fx.client
+        .dispute_sub_signals(&fx.disputer, &fx.asset, &hour, &0u32, &dummy_hash(&env));
+    let built_at = redisputed_at + crate::SIGNAL_DISPUTE_RULING_SECS + 86_400 - 600;
+    fx.at(built_at);
+    let days = (built_at - first_post) as f64 / 86_400.0;
+    assert!(
+        days > 7.15,
+        "the build lands {days:.2} days after the first post"
+    );
+
+    for sub in 1..per_hour {
+        assert!(
+            fx.sub_signals_ttl(sub) > 0,
+            "SubSignals sub {sub} expired before the build, {days:.2} days after its post"
+        );
+    }
+
+    fx.client
+        .resolve_sub_dispute_timeout(&fx.asset, &hour, &0u32);
+    assert!(
+        fx.client.is_final(&fx.asset, &hour),
+        "the hour builds at the timeout"
+    );
+
+    // The full inputs hash: the repost's, then every sibling's, in order.
+    let mut combined = Bytes::new(&env);
+    combined.append(&Bytes::from_array(&env, &[100u8; 32]));
+    for sub in 1..per_hour {
+        combined.append(&Bytes::from_array(&env, &[sub as u8 + 1; 32]));
+    }
+    let expected: BytesN<32> = env.crypto().sha256(&combined).into();
+    assert_eq!(
+        fx.client.signals(&fx.asset, &hour).unwrap().inputs_hash,
+        expected
+    );
+
+    // Every keeper behind a Final sub-epoch is paid once; the
+    // overturned first post is not.
+    for sub in 1..per_hour {
+        assert_eq!(
+            fx.staking
+                .reward_keeper_sub_epoch_count(&fx.keepers[sub as usize]),
+            1,
+            "keeper of sub {sub}"
+        );
+    }
+    assert_eq!(fx.staking.reward_keeper_sub_epoch_count(&reposter), 1);
+    assert_eq!(fx.staking.reward_keeper_sub_epoch_count(&fx.keepers[0]), 0);
+}
+
+/// An overturn re-extends every other `SubSignals` entry of the hour to
+/// the full history lifetime, the safeguard for the spec's two-cycle
+/// case (Section 5.9 S2). Overturned near its 6 day ruling deadline,
+/// the siblings are down to about 4 days, below the 8 day threshold.
+#[test]
+fn an_overturn_re_extends_every_sibling_sub_signals_to_the_history_lifetime() {
+    use sylox_types::ttl::{HISTORY_TTL_EXTEND_TO, HISTORY_TTL_THRESHOLD};
+
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let hour = TTL_HOUR;
+    let per_hour = fx.keepers.len() as u32;
+    fx.post_hour();
+
+    let disputed_at = hour_close(hour);
+    fx.at(disputed_at);
+    fx.client
+        .dispute_sub_signals(&fx.disputer, &fx.asset, &hour, &0u32, &dummy_hash(&env));
+    fx.at(disputed_at + crate::SIGNAL_DISPUTE_RULING_SECS - 60);
+    for sub in 1..per_hour {
+        assert!(
+            fx.sub_signals_ttl(sub) < HISTORY_TTL_THRESHOLD,
+            "sub {sub} must be below the threshold before the overturn"
+        );
+    }
+
+    fx.client
+        .resolve_sub_signal_dispute(&fx.asset, &hour, &0u32, &false, &dummy_hash(&env));
+
+    for sub in 1..per_hour {
+        assert_eq!(
+            fx.sub_signals_ttl(sub),
+            HISTORY_TTL_EXTEND_TO,
+            "sub {sub} must be re-extended by the overturn"
+        );
+    }
+    let overturned = env.as_contract(&fx.contract_id, || {
+        crate::storage::get_sub_signals(&env, &fx.asset, hour, 0)
+    });
+    assert!(
+        overturned.is_none(),
+        "the overturned sub-epoch itself moved to history"
+    );
+}
+
+// -- held repost disputes (#92, docs/design/held-repost-disputes.md) --
+
+impl<'a> TtlFx<'a> {
+    fn calls(&self, name: &str) -> u32 {
+        self.staking
+            .call_count(&soroban_sdk::Symbol::new(self.env, name))
+    }
+
+    fn held_state(&self, sub: u32) -> Option<SlotState> {
+        self.env.as_contract(&self.contract_id, || {
+            crate::storage::get_held_hour(self.env, &self.asset, TTL_HOUR)
+                .and_then(|m| m.get(sub))
+                .map(|h| h.state)
+        })
+    }
+
+    fn ttl_of(&self, key: crate::storage::DataKey) -> u32 {
+        use soroban_sdk::testutils::storage::Persistent as _;
+        self.env.as_contract(&self.contract_id, || {
+            self.env.storage().persistent().get_ttl(&key)
+        })
+    }
+
+    /// The full hour posted (sub 0 wrong), sub 0 disputed at the hour's
+    /// close and overturned a minute before its 6-day deadline, then
+    /// reposted a minute before its repost window closes, long past the
+    /// ring span, so the repost lands in `HeldHour` only. Returns the
+    /// repost's address and time.
+    fn held_repost(&self) -> (Address, u64) {
+        self.post_hour();
+        let disputed_at = hour_close(TTL_HOUR);
+        self.at(disputed_at);
+        self.client.dispute_sub_signals(
+            &self.disputer,
+            &self.asset,
+            &TTL_HOUR,
+            &0u32,
+            &dummy_hash(self.env),
+        );
+        self.at(disputed_at + crate::SIGNAL_DISPUTE_RULING_SECS - 60);
+        self.client.resolve_sub_signal_dispute(
+            &self.asset,
+            &TTL_HOUR,
+            &0u32,
+            &false,
+            &dummy_hash(self.env),
+        );
+        let reposter = Address::generate(self.env);
+        let reposted_at = disputed_at + crate::SIGNAL_DISPUTE_RULING_SECS - 60 + 7_200 - 60;
+        self.at(reposted_at);
+        self.client.post_sub_signals(
+            &reposter,
+            &self.asset,
+            &TTL_HOUR,
+            &0u32,
+            &self.signals(10_000_000, 100),
+        );
+        let sub_start0 = sub_start(TTL_HOUR, 0, SUB_EPOCH_SECS_DEFAULT);
+        let in_ring = self.env.as_contract(&self.contract_id, || {
+            crate::storage::get_sub_slot(self.env, &self.asset, sub_start0)
+        });
+        assert!(
+            in_ring.is_none(),
+            "the repost is past the ring span, so held only"
+        );
+        (reposter, reposted_at)
+    }
+
+    fn dispute_repost(&self, at: u64) {
+        self.at(at);
+        self.client.dispute_sub_signals(
+            &self.disputer,
+            &self.asset,
+            &TTL_HOUR,
+            &0u32,
+            &dummy_hash(self.env),
+        );
+    }
+
+    /// Asserts the built hour's inputs hash is the repost's then every
+    /// sibling's (`with_repost`), or the siblings' alone.
+    fn assert_inputs_hash(&self, with_repost: bool) {
+        use soroban_sdk::{Bytes, BytesN};
+        let mut combined = Bytes::new(self.env);
+        if with_repost {
+            combined.append(&Bytes::from_array(self.env, &[100u8; 32]));
+        }
+        for sub in 1..self.keepers.len() as u32 {
+            combined.append(&Bytes::from_array(self.env, &[sub as u8 + 1; 32]));
+        }
+        let expected: BytesN<32> = self.env.crypto().sha256(&combined).into();
+        assert_eq!(
+            self.client
+                .signals(&self.asset, &TTL_HOUR)
+                .unwrap()
+                .inputs_hash,
+            expected
+        );
+    }
+
+    fn assert_paid(&self, reposter: &Address, reposter_paid: u32) {
+        for sub in 1..self.keepers.len() {
+            assert_eq!(
+                self.staking
+                    .reward_keeper_sub_epoch_count(&self.keepers[sub]),
+                1,
+                "keeper of sub {sub}"
+            );
+        }
+        assert_eq!(
+            self.staking.reward_keeper_sub_epoch_count(reposter),
+            reposter_paid
+        );
+        assert_eq!(
+            self.staking.reward_keeper_sub_epoch_count(&self.keepers[0]),
+            0,
+            "the overturned first post is never paid"
+        );
+    }
+}
+
+/// #92's day-6 probe, now passing (D1): a repost that lives only in
+/// `HeldHour` is disputed. Its held entry reads `Disputed`, its
+/// `SubDispute` exists and the disputer's bond is locked.
+#[test]
+fn a_held_repost_can_be_disputed() {
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let (_, reposted_at) = fx.held_repost();
+    assert_eq!(fx.held_state(0), Some(SlotState::Pending));
+
+    let locks_before = fx.calls("lock_bond");
+    fx.dispute_repost(reposted_at + 60);
+    assert_eq!(
+        fx.calls("lock_bond"),
+        locks_before + 1,
+        "the disputer's bond is locked"
+    );
+    assert_eq!(fx.held_state(0), Some(SlotState::Disputed));
+    let dispute = env.as_contract(&fx.contract_id, || {
+        crate::storage::get_sub_dispute(&env, &fx.asset, TTL_HOUR, 0)
+    });
+    assert!(dispute.is_some(), "SubDispute exists");
+}
+
+/// The double-contested hour through a held repost, keeper wins: the
+/// ruling on the repost's dispute builds the hour about 12.1 days after
+/// the first post, with the repost's value, the full inputs hash and
+/// every keeper behind a Final sub-epoch paid once.
+#[test]
+fn keeper_wins_on_a_held_repost_builds_the_hour_in_full_about_12_1_days_later() {
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let (reposter, reposted_at) = fx.held_repost();
+    let disputed_at = reposted_at + 60;
+    fx.dispute_repost(disputed_at);
+
+    let built_at = disputed_at + crate::SIGNAL_DISPUTE_RULING_SECS - 60;
+    fx.at(built_at);
+    fx.client
+        .resolve_sub_signal_dispute(&fx.asset, &TTL_HOUR, &0u32, &true, &dummy_hash(&env));
+    let first_post = sub_start(TTL_HOUR, 0, SUB_EPOCH_SECS_DEFAULT) + SUB_EPOCH_SECS_DEFAULT;
+    let days = (built_at - first_post) as f64 / 86_400.0;
+    assert!(days > 12.1, "builds {days:.2} days after the first post");
+
+    assert!(fx.client.is_final(&fx.asset, &TTL_HOUR));
+    assert_eq!(
+        fx.client.signals(&fx.asset, &TTL_HOUR).unwrap().peg_ratio,
+        10_000_000
+    );
+    fx.assert_inputs_hash(true);
+    fx.assert_paid(&reposter, 1);
+}
+
+/// The held repost is overturned again: the reposter is slashed and
+/// never paid, no further repost is accepted, and the hour builds
+/// without sub 0 in that same call (the overturn's record starts
+/// `reposted`, so sub 0 is permanently missing at once).
+#[test]
+fn a_held_repost_overturned_again_builds_without_it() {
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let (reposter, reposted_at) = fx.held_repost();
+    let disputed_at = reposted_at + 60;
+    fx.dispute_repost(disputed_at);
+
+    fx.at(disputed_at + crate::SIGNAL_DISPUTE_RULING_SECS - 60);
+    let slashes_before = fx.calls("slash");
+    fx.client
+        .resolve_sub_signal_dispute(&fx.asset, &TTL_HOUR, &0u32, &false, &dummy_hash(&env));
+    assert_eq!(
+        fx.calls("slash"),
+        slashes_before + 1,
+        "the reposter is slashed"
+    );
+    assert!(
+        fx.client.is_final(&fx.asset, &TTL_HOUR),
+        "builds in the same call"
+    );
+    fx.assert_inputs_hash(false);
+    fx.assert_paid(&reposter, 0);
+    assert!(
+        fx.client
+            .try_post_sub_signals(
+                &reposter,
+                &fx.asset,
+                &TTL_HOUR,
+                &0u32,
+                &fx.signals(10_000_000, 101)
+            )
+            .is_err(),
+        "a repost overturned again gets no further repost"
+    );
+}
+
+/// The double-contested hour through a held repost, closed by the
+/// timeout at the last ledger of the repost's `SubDispute` (D4): about
+/// 13.1 days after the first post. Every sibling `SubSignals` and
+/// `HeldHour` are still live, and the hour builds in full.
+#[test]
+fn a_late_timeout_on_a_held_repost_builds_the_hour_in_full_about_13_1_days_later() {
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let (reposter, reposted_at) = fx.held_repost();
+    let disputed_at = reposted_at + 60;
+    fx.dispute_repost(disputed_at);
+
+    // The last ledger `SubDispute` is live on: it was extended to
+    // SUB_DISPUTE_TTL_LEDGERS at the dispute.
+    let last = disputed_at + (crate::SUB_DISPUTE_TTL_LEDGERS as u64) * 5 - 5;
+    fx.at(last);
+    let first_post = sub_start(TTL_HOUR, 0, SUB_EPOCH_SECS_DEFAULT) + SUB_EPOCH_SECS_DEFAULT;
+    let days = (last - first_post) as f64 / 86_400.0;
+    assert!(days > 13.1, "builds {days:.2} days after the first post");
+    assert!(
+        fx.ttl_of(crate::storage::DataKey::SubDispute(
+            fx.asset.clone(),
+            TTL_HOUR,
+            0
+        )) > 0
+    );
+    assert!(
+        fx.ttl_of(crate::storage::DataKey::HeldHour(
+            fx.asset.clone(),
+            TTL_HOUR
+        )) > 0
+    );
+    for sub in 1..fx.keepers.len() as u32 {
+        assert!(fx.sub_signals_ttl(sub) > 0, "sibling {sub} is live");
+    }
+
+    fx.client
+        .resolve_sub_dispute_timeout(&fx.asset, &TTL_HOUR, &0u32);
+    assert!(fx.client.is_final(&fx.asset, &TTL_HOUR));
+    fx.assert_inputs_hash(true);
+    fx.assert_paid(&reposter, 1);
+}
+
+/// A held repost's own dispute window applies: at its `pending_until`
+/// the dispute is refused.
+#[test]
+fn a_held_repost_cannot_be_disputed_after_its_pending_until() {
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let (_, reposted_at) = fx.held_repost();
+    fx.at(reposted_at + crate::SIGNAL_DISPUTE_SECS);
+    assert_eq!(
+        fx.client.try_dispute_sub_signals(
+            &fx.disputer,
+            &fx.asset,
+            &TTL_HOUR,
+            &0u32,
+            &dummy_hash(&env)
+        ),
+        Err(Ok(crate::Error::DisputeWindowClosed))
+    );
+}
+
+/// D1: once an hour is held, `HeldHour` is the only source. A sub-epoch
+/// with no held entry is `WrongEpoch`, even while its ring slot is
+/// still Pending and inside its own dispute window.
+#[test]
+fn in_a_held_hour_a_sub_epoch_with_no_held_entry_is_wrong_epoch() {
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    fx.post_hour();
+    fx.at(hour_close(TTL_HOUR));
+    fx.client
+        .dispute_sub_signals(&fx.disputer, &fx.asset, &TTL_HOUR, &0u32, &dummy_hash(&env));
+    env.as_contract(&fx.contract_id, || {
+        crate::storage::remove_held_sub_slot(&env, &fx.asset, TTL_HOUR, 5)
+    });
+    let ring = env.as_contract(&fx.contract_id, || {
+        crate::storage::get_sub_slot(
+            &env,
+            &fx.asset,
+            sub_start(TTL_HOUR, 5, SUB_EPOCH_SECS_DEFAULT),
+        )
+    });
+    assert_eq!(
+        ring.map(|s| s.state),
+        Some(SlotState::Pending),
+        "the ring still has it"
+    );
+    assert_eq!(
+        fx.client.try_dispute_sub_signals(
+            &fx.disputer,
+            &fx.asset,
+            &TTL_HOUR,
+            &5u32,
+            &dummy_hash(&env)
+        ),
+        Err(Ok(crate::Error::WrongEpoch))
+    );
+}
+
+/// D3: `HeldHour` outlives the hour's open `SubDispute` by one day.
+#[test]
+fn held_hour_outlives_the_last_open_sub_dispute_by_one_day() {
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    fx.post_hour();
+    fx.at(hour_close(TTL_HOUR));
+    fx.client
+        .dispute_sub_signals(&fx.disputer, &fx.asset, &TTL_HOUR, &3u32, &dummy_hash(&env));
+    let dispute = fx.ttl_of(crate::storage::DataKey::SubDispute(
+        fx.asset.clone(),
+        TTL_HOUR,
+        3,
+    ));
+    let held = fx.ttl_of(crate::storage::DataKey::HeldHour(
+        fx.asset.clone(),
+        TTL_HOUR,
+    ));
+    assert_eq!(dispute, crate::SUB_DISPUTE_TTL_LEDGERS);
+    assert_eq!(held, dispute + 17_280);
+}
+
+/// D2, sub-epoch path: a ruling one second before the deadline is
+/// accepted, while the timeout is not yet open; at the deadline the
+/// ruling is refused and the timeout closes the dispute.
+#[test]
+fn sub_epoch_rulings_close_at_the_deadline_and_the_timeout_opens_there() {
+    let deadline = |fx: &TtlFx| {
+        fx.post_hour();
+        let disputed_at = hour_close(TTL_HOUR);
+        fx.at(disputed_at);
+        fx.client.dispute_sub_signals(
+            &fx.disputer,
+            &fx.asset,
+            &TTL_HOUR,
+            &0u32,
+            &dummy_hash(fx.env),
+        );
+        disputed_at + crate::SIGNAL_DISPUTE_RULING_SECS
+    };
+
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let d = deadline(&fx);
+    fx.at(d - 1);
+    assert_eq!(
+        fx.client
+            .try_resolve_sub_dispute_timeout(&fx.asset, &TTL_HOUR, &0u32),
+        Err(Ok(crate::Error::RulingDeadlineNotReached))
+    );
+    fx.client
+        .resolve_sub_signal_dispute(&fx.asset, &TTL_HOUR, &0u32, &true, &dummy_hash(&env));
+
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let d = deadline(&fx);
+    fx.at(d);
+    assert_eq!(
+        fx.client.try_resolve_sub_signal_dispute(
+            &fx.asset,
+            &TTL_HOUR,
+            &0u32,
+            &true,
+            &dummy_hash(&env)
+        ),
+        Err(Ok(crate::Error::RulingDeadlinePassed))
+    );
+    fx.client
+        .resolve_sub_dispute_timeout(&fx.asset, &TTL_HOUR, &0u32);
+}
+
+/// D2, hourly path: the same boundary for `resolve_signal_dispute`.
+#[test]
+fn hourly_rulings_close_at_the_deadline_and_the_timeout_opens_there() {
+    let epoch = TTL_HOUR;
+    let deadline = |fx: &TtlFx| {
+        fx.at((epoch + 1) * EPOCH_SECS);
+        fx.client.post_signals(
+            &fx.keepers[0],
+            &fx.asset,
+            &signal_set(fx.env, epoch, 9_900_000),
+        );
+        fx.client
+            .dispute_signals(&fx.disputer, &fx.asset, &epoch, &dummy_hash(fx.env));
+        (epoch + 1) * EPOCH_SECS + crate::SIGNAL_DISPUTE_RULING_SECS
+    };
+
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let d = deadline(&fx);
+    fx.at(d - 1);
+    assert_eq!(
+        fx.client
+            .try_resolve_signal_dispute_timeout(&fx.asset, &epoch),
+        Err(Ok(crate::Error::RulingDeadlineNotReached))
+    );
+    fx.client
+        .resolve_signal_dispute(&fx.asset, &epoch, &true, &dummy_hash(&env));
+
+    let env = Env::default();
+    let fx = TtlFx::new(&env);
+    let d = deadline(&fx);
+    fx.at(d);
+    assert_eq!(
+        fx.client
+            .try_resolve_signal_dispute(&fx.asset, &epoch, &true, &dummy_hash(&env)),
+        Err(Ok(crate::Error::RulingDeadlinePassed))
+    );
+    fx.client.resolve_signal_dispute_timeout(&fx.asset, &epoch);
 }
 
 fn dummy_hash(env: &Env) -> soroban_sdk::BytesN<32> {

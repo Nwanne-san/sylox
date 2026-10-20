@@ -60,4 +60,8 @@ pub enum Error {
     /// I26 follow-up): silently clamping to 0 would hide exactly that
     /// drift instead of surfacing it.
     AccountingUnderflow = 409,
+    /// Governor handover (feat/set-governor-handover): `set_governor`
+    /// called a second time. One-time lock, same shape as
+    /// EventRegistry's `FactoryAlreadySet`.
+    GovernorAlreadySet = 410,
 }

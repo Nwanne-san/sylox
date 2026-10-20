@@ -34,6 +34,7 @@ mod events;
 mod storage;
 
 use soroban_sdk::{contract, contractimpl, token, Address, Env, String, Vec};
+use sylox_types::time::EPOCH_SECS;
 use sylox_types::{
     AssetEventStatus, Band, CoverGate, EventKind, GuardStatus, Quote, SellerPosition, SeriesState,
     SeriesTerms, SeriesTotals, TreasuryBucket,
@@ -44,8 +45,13 @@ use storage::{AllowanceValue, Config};
 
 use clients::{EventRegistryClient, MarketFactoryClient, PriceGuardClient, RiskOracleClient};
 
-/// Section 9.2: `sale_end = expiry - sale_cutoff_secs`.
-const SALE_CUTOFF_SECS: u64 = 3 * 86_400;
+/// Section 9.2: `sale_end = expiry - sale_cutoff_secs`. 72 epochs (3
+/// days at the defaults), written as a multiple of `EPOCH_SECS` so a
+/// series opened under the `demo-time` feature gets a sale window
+/// short enough to actually fit a demo's own `expiry`, rather than a
+/// fixed 3 real days regardless of how the rest of the deployment is
+/// scaled.
+const SALE_CUTOFF_SECS: u64 = 72 * EPOCH_SECS;
 /// Section 11.5 default: 100 USDC at 7 decimals.
 const MIN_DEPOSIT: i128 = 1_000_000_000;
 /// Section 9.3/11.5 default.
@@ -281,11 +287,15 @@ impl Series {
 
     // -- buyer side (Section 9.4, 9.5) --
 
+    /// Takes the buyer's signed `max_premium`, charges the real premium
+    /// and refunds the difference in the same call; `PremiumAboveMax`
+    /// if the real premium is higher. Returns `(filled, premium)`.
     pub fn buy_cover(
         env: Env,
         buyer: Address,
         amount: i128,
         max_rate_bps: u32,
+        max_premium: i128,
     ) -> Result<(i128, i128), Error> {
         buyer.require_auth();
         if Self::sync_internal(&env) != SeriesState::Open {
@@ -344,15 +354,23 @@ impl Series {
         if filled == 0 {
             return Err(Error::NoFill);
         }
+        if premium_total > max_premium {
+            return Err(Error::PremiumAboveMax);
+        }
 
         factory.reserve_cover(&env.current_contract_address(), &filled);
         storage::add_total_reserved(&env, filled);
 
-        token::TokenClient::new(&env, &terms.settlement).transfer(
-            &buyer,
-            env.current_contract_address(),
-            &premium_total,
-        );
+        // The buyer signs a fixed `max_premium`, not the live premium,
+        // which falls every second as `time_remaining` shrinks: a
+        // simulated amount would no longer match the signed transfer
+        // once the transaction lands a few seconds later (Section 9.4).
+        let usdc = token::TokenClient::new(&env, &terms.settlement);
+        usdc.transfer(&buyer, env.current_contract_address(), &max_premium);
+        let refund = max_premium - premium_total;
+        if refund > 0 {
+            usdc.transfer(&env.current_contract_address(), &buyer, &refund);
+        }
         sylox_types::treasury_deposit::deposit_treasury_share(
             &env,
             &terms.settlement,
@@ -600,24 +618,37 @@ impl Series {
     /// M1 (design note Section 2): allowed if the newest posted
     /// sub-epoch is the last one that closed, OR it is the one before
     /// that AND fewer than `feed_grace_secs` have passed since the
-    /// last sub-epoch closed.
+    /// last sub-epoch closed. Each boundary uses the sub-epoch length in
+    /// force for its own hour (`RiskOracle.sub_epoch_secs_at`), so a
+    /// `sub_epoch_secs` change taking effect at an hour boundary is
+    /// measured the same way the oracle measures it.
     fn check_feed_not_behind(
         env: &Env,
         oracle: &RiskOracleClient,
         asset: &Address,
     ) -> Result<(), Error> {
         let (sub_epoch, _signals, _slot_state) = oracle.live(asset).ok_or(Error::FeedBehind)?;
-        let sub_epoch_secs = oracle
-            .sub_epoch_config(asset)
-            .map(|c| c.sub_epoch_secs)
-            .unwrap_or(300);
-        let posted_close = sub_epoch.hour * 3_600 + (sub_epoch.sub as u64 + 1) * sub_epoch_secs;
         let now = env.ledger().timestamp();
-        let last_closed_boundary = (now / sub_epoch_secs) * sub_epoch_secs;
+        let current_hour = now / EPOCH_SECS;
+        let current_len = oracle.sub_epoch_secs_at(asset, &current_hour);
+        let len_at = |hour: u64| {
+            if hour == current_hour {
+                current_len
+            } else {
+                oracle.sub_epoch_secs_at(asset, &hour)
+            }
+        };
+
+        let posted_close =
+            sub_epoch.hour * EPOCH_SECS + (sub_epoch.sub as u64 + 1) * len_at(sub_epoch.hour);
+        let last_closed_boundary = (now / current_len) * current_len;
         if posted_close == last_closed_boundary {
             return Ok(());
         }
-        if posted_close + sub_epoch_secs == last_closed_boundary
+        // The sub-epoch that closed at `last_closed_boundary` belongs to
+        // the previous hour when that boundary is the hour's own start.
+        let closing_len = len_at((last_closed_boundary - 1) / EPOCH_SECS);
+        if posted_close + closing_len == last_closed_boundary
             && now - last_closed_boundary < FEED_GRACE_SECS
         {
             return Ok(());
@@ -909,8 +940,8 @@ impl Series {
                     .definition(&terms.asset, &kind, &version)
                     .map(|d| d.depeg_window_secs)
                     .unwrap_or(0),
-                EventKind::IssuerFreeze => 7 * 86_400,
-                EventKind::MintWithoutBacking => 24 * 3_600,
+                EventKind::IssuerFreeze => 168 * EPOCH_SECS,
+                EventKind::MintWithoutBacking => 24 * EPOCH_SECS,
                 EventKind::WithdrawalHalt => registry
                     .definition(&terms.asset, &kind, &version)
                     .map(|d| d.halt_window_secs)

@@ -69,4 +69,19 @@ pub enum Error {
     /// most once; a second call for the same (or an earlier) version is
     /// a no-op request, not a retry of something that failed.
     AlreadyMigrated = 116,
+    /// technical-doc.md Section 5.9 S1: `set_sub_epoch_secs` called
+    /// fewer than 240 hours (10 days) after the previous change took
+    /// effect. It only limits how often the length changes; each hour is
+    /// resolved from the length recorded at its first post
+    /// (`HourSubEpochSecs`), which is what keeps old hours correct.
+    SubEpochChangeTooSoon = 117,
+    /// docs/design/held-repost-disputes.md D2: `resolve_signal_dispute`
+    /// or `resolve_sub_signal_dispute` called at or after
+    /// `opened_at + SIGNAL_DISPUTE_RULING_SECS`. From that instant only
+    /// the timeout can close the dispute.
+    RulingDeadlinePassed = 118,
+    /// Governor handover (feat/set-governor-handover): `set_governor`
+    /// called a second time. One-time lock, same shape as
+    /// EventRegistry's `FactoryAlreadySet`.
+    GovernorAlreadySet = 119,
 }

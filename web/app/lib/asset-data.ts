@@ -18,6 +18,19 @@ export const PEG_RATIO_SCALE = 10_000_000; // i128, scale 1e7 (RiskOracle's own 
 const EPOCH_SECS = 3600; // technical-doc.md Section 23: epoch_secs is frozen at 3600 (1 hour) for v1.
 const AGGREGATE_SLOTS_7D = 168; // contracts/risk-oracle/src/score.rs's AGGREGATE_SLOTS_7D - the 7-day score baseline (review decision D2), same constant lib.rs's own scoring gate checks against first_epoch.
 const SIGNAL_DISPUTE_SECS = 7_200; // contracts/staking/src/params.rs's SIGNAL_DISPUTE_SECS (2h) - the dispute window an hour must clear before Pending can be promoted to Final; also re-declared locally in contracts/risk-oracle/src/lib.rs with the same value.
+// contracts/risk-oracle/src/lib.rs's own HOUR_PENDING_SENTINEL
+// (refresh_waiting_hour): the pending_until a Pending/Disputed hour
+// carries while it's still waiting on its own sub-epochs to all decide,
+// before the hour is actually built - there is no real promotion
+// deadline yet, so the contract writes u64::MAX rather than leaving the
+// field unset (RingSlot.pending_until is non-optional). Number(bigint)
+// on this value overflows past Number.MAX_SAFE_INTEGER, which is what
+// produced "can still be challenged until NaN:NaN UTC": new Date(huge
+// number) is an Invalid Date, and getUTCHours()/getUTCMinutes() on an
+// Invalid Date both return NaN. Confirmed directly against live testnet
+// USDC data (113 of 240 ring hours currently carry this exact sentinel
+// while their sub-epochs are still posting).
+const HOUR_PENDING_SENTINEL = BigInt("18446744073709551615"); // u64::MAX
 
 // `al.oracle`/`al.events` deliberately only wrap a subset of reads (see
 // oracle.ts/events/list.ts's own "thinner surface" doc comments) -
@@ -209,8 +222,39 @@ export interface ConfirmedValue {
 export interface LatestPendingHour {
   epoch: bigint;
   pegRatio: number;
-  /** Ledger timestamp after which this hour becomes Confirmed - from the slot's own pending_until, never a placeholder. */
-  pendingUntil: bigint;
+  /**
+   * Ledger timestamp after which this hour becomes Confirmed - from the
+   * slot's own pending_until, never a placeholder. Null specifically
+   * when the contract's own HOUR_PENDING_SENTINEL is set: the hour is
+   * still waiting on its sub-epochs and genuinely has no real deadline
+   * yet (see HOUR_PENDING_SENTINEL's own doc comment above) - the UI
+   * must never format this as a date.
+   */
+  pendingUntil: bigint | null;
+}
+
+/**
+ * Walks `ring` newest-to-oldest for the newest EFFECTIVELY Final slot's
+ * peg_ratio, descaled to a plain decimal - the one source of truth for
+ * "the asset's current peg" every screen that shows that number reads
+ * from (the asset page's Confirmed card via fetchConfirmed below, and
+ * the Explorer card via fetchExplorerRow in explorer-data.ts). Never
+ * RiskOracle.latest(), which only covers the hourly-fallback posting
+ * path and reads back null for an asset currently on the sub-epoch path
+ * (confirmed directly against live testnet USDC data: latest() → null,
+ * while this walk finds a real settled value) - that mismatch is what
+ * previously made the Explorer card show "—" while the asset page's
+ * Confirmed card, which already used this same walk, showed a real
+ * number for the same asset at the same moment.
+ */
+export function newestEffectiveFinalPegRatio(ring: EffectiveRingSlot[]): { epoch: bigint; pegRatio: number } | null {
+  for (let i = ring.length - 1; i >= 0; i--) {
+    const slot = ring[i];
+    if (slot.effectiveState === "Final") {
+      return { epoch: slot.epoch, pegRatio: Number(slot.peg_ratio) / PEG_RATIO_SCALE };
+    }
+  }
+  return null;
 }
 
 export async function fetchConfirmed(
@@ -218,25 +262,17 @@ export async function fetchConfirmed(
 ): Promise<{ confirmed: ConfirmedValue | null; latestPending: LatestPendingHour | null }> {
   const [ring, riskScore] = await Promise.all([al.oracle.ring(asset), al.oracle.score(asset)]);
 
-  // Walk newest-to-oldest (the ring is returned oldest-first) for the
-  // newest slot that is effectively Final - this is the hour "score" and
-  // "band" above were actually computed from (RiskOracle.score() is
-  // itself defined off the newest Final epoch, see lib.rs's score() doc
-  // comment), so pairing them here is pairing like with like, not reusing
-  // latest() which can point at a still-Pending hour.
-  let confirmed: ConfirmedValue | null = null;
-  for (let i = ring.length - 1; i >= 0; i--) {
-    const slot = ring[i];
-    if (slot.effectiveState === "Final") {
-      confirmed = {
-        epoch: slot.epoch,
-        pegRatio: Number(slot.peg_ratio) / PEG_RATIO_SCALE,
-        score: riskScore.score,
-        band: riskBandFor(riskScore.band),
-      };
-      break;
-    }
-  }
+  // "score" and "band" come from RiskOracle.score() - itself defined off
+  // the newest Final epoch (lib.rs's score() doc comment) - so pairing
+  // them with newestEffectiveFinalPegRatio's own walk here is pairing
+  // like with like.
+  const newestFinal = newestEffectiveFinalPegRatio(ring);
+  const confirmed: ConfirmedValue | null = newestFinal && {
+    epoch: newestFinal.epoch,
+    pegRatio: newestFinal.pegRatio,
+    score: riskScore.score,
+    band: riskBandFor(riskScore.band),
+  };
 
   // The newest slot overall, only if it's a real posted hour still inside
   // its own dispute window (genuinely Pending, not yet promoted to
@@ -247,7 +283,7 @@ export async function fetchConfirmed(
     latestPending = {
       epoch: newest.epoch,
       pegRatio: Number(newest.peg_ratio) / PEG_RATIO_SCALE,
-      pendingUntil: newest.pending_until,
+      pendingUntil: newest.pending_until === HOUR_PENDING_SENTINEL ? null : newest.pending_until,
     };
   }
 

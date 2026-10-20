@@ -32,6 +32,28 @@ pub enum Action {
     TreasuryAllocate(TreasuryBucket, TreasuryBucket, i128),
     /// (bucket, recipient, amount): pays Treasury funds out (ADR-004).
     TreasurySpend(TreasuryBucket, Address, i128),
+    // Appended after the Section 17.1 variants (docs/design/governor.md
+    // Section 4.3, deviation 3). Each one's fields match its target
+    // setter's exact signature; there is no generic "call anything"
+    // action.
+    /// Changes the guardian address in the Governor's own `Config`
+    /// (D3).
+    SetGuardian(Address),
+    /// Pauses `scope`, or renews an active pause: sets the lapse time
+    /// to `now + max_pause_secs` either way (D8).
+    Pause(PauseScope),
+    /// (asset, value): `RiskOracle.set_sub_epoch_secs` (D12).
+    SetSubEpochSecs(Address, u64),
+    /// (asset, amount): `MarketFactory.set_hard_cap` (D12).
+    SetHardCap(Address, i128),
+    /// (asset, list): `MarketFactory.set_related_sellers` (D12).
+    SetRelatedSellers(Address, Vec<Address>),
+    /// (asset, guard): `MarketFactory.set_price_guard`; `None` removes
+    /// the guard (D12).
+    SetPriceGuard(Address, Option<Address>),
+    /// `EventRegistry.set_factory`, one-time per that contract's own
+    /// lock (D12).
+    SetFactory(Address),
 }
 
 #[contracttype]

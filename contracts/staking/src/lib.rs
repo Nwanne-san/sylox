@@ -87,8 +87,13 @@ struct Config {
 
 const CONFIG_KEY: Symbol = soroban_sdk::symbol_short!("CONFIG");
 
+/// `set_governor`'s own one-time lock, same shape as EventRegistry's
+/// `FACTORY_SET_KEY`: absent until the first successful `set_governor`
+/// call, then permanently present, so a second call always fails.
+const GOVERNOR_SET_KEY: Symbol = soroban_sdk::symbol_short!("GOV_SET");
+
 /// Issue #12. Bump by hand on every `upgrade()` this contract ships.
-const CONTRACT_VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
 /// Issue #12. Instance key for `sylox_types::upgrade::do_migrate`'s own
 /// "which version has this contract's storage already been migrated to"
 /// marker.
@@ -119,6 +124,7 @@ impl Staking {
         treasury: Address,
         usdc: Address,
     ) {
+        sylox_types::ttl::extend_instance(&env);
         env.storage().instance().set(
             &CONFIG_KEY,
             &Config {
@@ -148,6 +154,7 @@ impl Staking {
     /// already uses.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         sylox_types::upgrade::do_upgrade(&env, &config.governor, CONTRACT_VERSION, new_wasm_hash);
         Ok(())
     }
@@ -164,6 +171,7 @@ impl Staking {
     /// decode under the new types) alongside it.
     pub fn migrate(env: Env) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         if !sylox_types::upgrade::do_migrate(
             &env,
             &config.governor,
@@ -175,11 +183,31 @@ impl Staking {
         Ok(())
     }
 
+    /// One-time governor handover, for the Governor deployment cutover:
+    /// callable only by the CURRENT governor, exactly once. Same
+    /// one-time-lock pattern as `EventRegistry::set_factory` (a storage
+    /// flag checked before the write, set after it), so a second call
+    /// always fails rather than letting the governor be reassigned
+    /// again later through this same path.
+    pub fn set_governor(env: Env, new_admin: Address) -> Result<(), Error> {
+        let mut config = Self::require_config(&env)?;
+        config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
+        if env.storage().instance().has(&GOVERNOR_SET_KEY) {
+            return Err(Error::GovernorAlreadySet);
+        }
+        config.governor = new_admin;
+        env.storage().instance().set(&CONFIG_KEY, &config);
+        env.storage().instance().set(&GOVERNOR_SET_KEY, &true);
+        Ok(())
+    }
+
     // -- membership (Section 7.6, 7.7, 12.3) --
 
     pub fn add_keeper(env: Env, keeper: Address) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if storage::get_keeper(&env, &keeper).is_some() {
             return Err(Error::AlreadyRegistered);
         }
@@ -214,6 +242,7 @@ impl Staking {
     pub fn remove_keeper(env: Env, keeper: Address) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         let mut info = storage::get_keeper(&env, &keeper).ok_or(Error::NotKeeper)?;
         let now = env.ledger().timestamp();
         info.removed_at = Some(now);
@@ -230,6 +259,7 @@ impl Staking {
     pub fn add_reporter(env: Env, reporter: Address, region: Symbol) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if storage::get_reporter(&env, &reporter).is_some() {
             return Err(Error::AlreadyRegistered);
         }
@@ -262,6 +292,7 @@ impl Staking {
     pub fn remove_reporter(env: Env, reporter: Address) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
         config.governor.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         let mut info = storage::get_reporter(&env, &reporter).ok_or(Error::NotReporter)?;
         let now = env.ledger().timestamp();
         info.removed_at = Some(now);
@@ -279,6 +310,7 @@ impl Staking {
 
     pub fn stake(env: Env, who: Address, amount: i128) -> Result<(), Error> {
         who.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if amount <= 0 {
             return Err(Error::StakeTooLow);
         }
@@ -329,6 +361,7 @@ impl Staking {
     /// cooldown" being a one-shot action per cycle.
     pub fn unstake_request(env: Env, who: Address, amount: i128) -> Result<(), Error> {
         who.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         if amount <= 0 {
             return Err(Error::StakeTooLow);
         }
@@ -371,6 +404,7 @@ impl Staking {
     /// `open_dispute_count` here, not only there.
     pub fn unstake(env: Env, who: Address) -> Result<i128, Error> {
         who.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         let config = Self::require_config(&env)?;
         let now = env.ledger().timestamp();
         let here = env.current_contract_address();
@@ -442,6 +476,7 @@ impl Staking {
     /// its own clock.
     pub fn withdraw_keeper_bond(env: Env, keeper: Address) -> Result<i128, Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         let mut info = storage::get_keeper(&env, &keeper).ok_or(Error::NotKeeper)?;
         let removed_at = info.removed_at.ok_or(Error::NotKeeper)?;
         let now = env.ledger().timestamp();
@@ -489,6 +524,7 @@ impl Staking {
     /// settlement window with margin.
     pub fn submit_probe(env: Env, reporter: Address, report: ProbeReport) -> Result<(), Error> {
         reporter.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         Self::require_config(&env)?;
         let info = storage::get_reporter(&env, &reporter).ok_or(Error::NotReporter)?;
         if info.suspended || info.removed_at.is_some() {
@@ -611,6 +647,7 @@ impl Staking {
     /// expire first.
     pub fn settle_probes(env: Env, asset: Address, epoch: u64) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         if storage::get_probes_settled(&env, &asset, epoch) {
             return Err(Error::AlreadySettled);
         }
@@ -753,6 +790,7 @@ impl Staking {
         subject: Option<Address>,
     ) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         Self::require_bond_caller(&env, &config, &key)?;
         Self::require_valid_subject(&key, &subject)?;
         if amount <= 0 {
@@ -800,6 +838,7 @@ impl Staking {
     /// say who may act on it.
     pub fn release_bond(env: Env, key: BondKey) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         Self::require_bond_caller(&env, &config, &key)?;
         let record = storage::get_bond(&env, &key).ok_or(Error::UnknownBond)?;
         storage::clear_bond(&env, &key);
@@ -825,6 +864,7 @@ impl Staking {
     /// here (S3: a participant's own funds).
     pub fn forfeit_bond(env: Env, key: BondKey, winner: Option<Address>) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         Self::require_bond_caller(&env, &config, &key)?;
         let record = storage::get_bond(&env, &key).ok_or(Error::UnknownBond)?;
         storage::clear_bond(&env, &key);
@@ -873,6 +913,7 @@ impl Staking {
         reason: BytesN<32>,
     ) -> Result<(), Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         Self::require_slash_caller(&env, &config)?;
         if amount <= 0 {
             // A non-positive amount is never a real slash (review fix
@@ -962,6 +1003,7 @@ impl Staking {
     /// unfunded rewards").
     pub fn reward_keeper(env: Env, keeper: Address, epochs: u32) -> Result<i128, Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         Self::require_oracle_caller(&env, &config)?;
         let Some(info) = storage::get_keeper(&env, &keeper) else {
             return Err(Error::NotKeeper);
@@ -999,6 +1041,7 @@ impl Staking {
         sub_epoch_secs: u64,
     ) -> Result<i128, Error> {
         let config = Self::require_config(&env)?;
+        sylox_types::ttl::extend_instance(&env);
         Self::require_oracle_caller(&env, &config)?;
         let Some(info) = storage::get_keeper(&env, &keeper) else {
             return Err(Error::NotKeeper);
@@ -1041,6 +1084,7 @@ impl Staking {
     /// this contract's concern now that `Treasury` exists.
     pub fn claim(env: Env, who: Address) -> Result<i128, Error> {
         who.require_auth();
+        sylox_types::ttl::extend_instance(&env);
         let config = Self::require_config(&env)?;
         let amount = storage::get_claimable(&env, &who);
         if amount <= 0 {

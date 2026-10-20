@@ -39,9 +39,7 @@ pub fn get_accrued(env: &Env, who: &Address) -> i128 {
 
 pub fn add_accrued(env: &Env, who: &Address, amount: i128) {
     let current = get_accrued(env, who);
-    env.storage()
-        .persistent()
-        .set(&DataKey::Accrued(who.clone()), &(current + amount));
+    sylox_types::ttl::set_persistent(env, &DataKey::Accrued(who.clone()), &(current + amount));
 }
 
 pub fn clear_accrued(env: &Env, who: &Address) {
