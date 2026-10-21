@@ -3871,8 +3871,16 @@ fn history_status_exactly_96_present_with_newest_slot_present() {
     assert_eq!(score.epoch, target_final);
 }
 
+// The "enough history, newest slot missing" state Issue #58 enumerated
+// (span >= 168, newest_final set, slot at newest_final empty) is not
+// reachable through public calls: a Final slot can never be overturned
+// (dispute requires Pending/Disputed state), and the finality scan always
+// picks the newest present Final slot, skipping Empty ones. The closest
+// reachable case overturns the newest epoch BEFORE it goes Final, which
+// pulls newest_final back by one and drops span under 168 instead. See the
+// PR description's "Known gaps" note.
 #[test]
-fn history_status_enough_history_but_newest_slot_missing_due_to_overturn() {
+fn history_status_overturn_pulls_newest_final_back_so_span_falls_short() {
     const BASE: u64 = 400_000;
     let env = Env::default();
     env.mock_all_auths();
@@ -3908,7 +3916,7 @@ fn history_status_enough_history_but_newest_slot_missing_due_to_overturn() {
         client.post_signals(&keeper, &asset, &s);
     }
 
-    // Now dispute the newest epoch (BASE + 167)
+    // Dispute the newest epoch while still Pending (BASE + 167)
     let newest_ep = BASE + 167;
     let disputer = Address::generate(&env);
     client.dispute_signals(
@@ -3918,7 +3926,7 @@ fn history_status_enough_history_but_newest_slot_missing_due_to_overturn() {
         &BytesN::from_array(&env, &[9u8; 32]),
     );
 
-    // Overturn the dispute: keeper_wins = false
+    // Overturn: keeper_wins = false, slot clears to Empty.
     client.resolve_signal_dispute(
         &asset,
         &newest_ep,
@@ -3926,19 +3934,23 @@ fn history_status_enough_history_but_newest_slot_missing_due_to_overturn() {
         &BytesN::from_array(&env, &[0u8; 32]),
     );
 
-    // Finalize older epochs up to BASE + 166
+    // Finalize older epochs up to BASE + 166.
     let target_final = BASE + 166;
     env.ledger()
         .set_timestamp(time_at_epoch(target_final) + crate::SIGNAL_DISPUTE_SECS + 1);
     client.finalize_endpoint(&asset, &target_final);
 
     let status = client.history_status(&asset);
-    // newest_epoch is BASE + 167 (still tracked in RingNewest)
+    // newest_epoch stays at BASE + 167 (RingNewest tracks the newest ever
+    // written; the overturn moves the slot to Empty but not that pointer).
     assert_eq!(status.newest_epoch, Some(newest_ep));
-    // newest_final is BASE + 166
+    // newest_final rolls back to the previous present Final epoch.
     assert_eq!(status.newest_final, Some(target_final));
     assert_eq!(status.span_epochs, 167);
     assert_eq!(status.epochs_until_span_ready, 1);
+    // The 168-slot window ends at newest_final (BASE+166), which IS
+    // present; the gate fails on span, not on the newest slot.
+    assert!(status.newest_slot_present);
     assert!(!status.score_ready);
 
     // Agreement check (test 10)
